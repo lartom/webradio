@@ -1,5 +1,7 @@
 # WebRadio
 
+![WebRadio TUI](screenshot.png)
+
 A terminal-based internet radio player built with FFmpeg and ncurses. Stream live audio from internet radio stations with metadata display, FFT spectrum visualization, and optional MusicBrainz integration.
 
 ## Features
