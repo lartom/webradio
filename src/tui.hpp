@@ -66,7 +66,7 @@ private:
     std::mutex debug_metadata_mutex_;
     
     // Pending debug metadata (thread-safe queue    std::vector from playback thread)
-<std::pair<std::string, std::string>> pending_debug_metadata_;
+    std::vector<std::pair<std::string, std::string>> pending_debug_metadata_;
     std::mutex pending_debug_mutex_;
     std::atomic<bool> has_pending_debug_metadata_{false};
     
