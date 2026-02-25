@@ -372,10 +372,10 @@ private:
             return false;
         }
         
-        audio_buffer_.consumerClear();
+        audio_buffer_.consumer_clear();
         constexpr size_t PREBUFFER_TARGET = 65536;
         
-        while (!stop_requested_ && audio_buffer_.readAvailable() < PREBUFFER_TARGET) {
+        while (!stop_requested_ && audio_buffer_.read_available() < PREBUFFER_TARGET) {
             ret = av_read_frame(fmt_ctx, packet);
             if (ret < 0) break;
             
@@ -535,7 +535,7 @@ private:
         avcodec_free_context(&codec_ctx);
         avformat_close_input(&fmt_ctx);
 
-        audio_buffer_.consumerClear();
+        audio_buffer_.consumer_clear();
         return true;
     }
 };

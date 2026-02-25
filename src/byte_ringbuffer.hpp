@@ -26,7 +26,7 @@ public:
         size_t head = head_.load(std::memory_order_relaxed);
         size_t tail = tail_.load(std::memory_order_acquire);
         
-        size_t available = writeAvailable(head, tail);
+        size_t available = write_available(head, tail);
         if (available == 0) return 0;
         
         size_t to_write = std::min(len, available);
@@ -51,7 +51,7 @@ public:
         size_t tail = tail_.load(std::memory_order_relaxed);
         size_t head = head_.load(std::memory_order_acquire);
         
-        size_t available = readAvailable(head, tail);
+        size_t available = read_available(head, tail);
         if (available == 0) return 0;
         
         size_t to_read = std::min(len, available);
@@ -71,39 +71,51 @@ public:
     }
 
     // Check available bytes for reading
-    size_t readAvailable() const {
+    size_t read_available() const {
         size_t head = head_.load(std::memory_order_seq_cst);
         size_t tail = tail_.load(std::memory_order_seq_cst);
-        return readAvailable(head, tail);
+        return read_available(head, tail);
     }
 
     // Check available space for writing
-    size_t writeAvailable() const {
+    size_t write_available() const {
         size_t head = head_.load(std::memory_order_seq_cst);
         size_t tail = tail_.load(std::memory_order_seq_cst);
-        return writeAvailable(head, tail);
+        return write_available(head, tail);
+    }
+
+    // Check max contiguous space available for writing (before wrap-around)
+    size_t write_availableContiguous() const {
+        size_t head = head_.load(std::memory_order_acquire);
+        return BUFFER_SIZE - (head & BUFFER_MASK);
+    }
+
+    // Check max contiguous data available for reading (before wrap-around)
+    size_t read_availableContiguous() const {
+        size_t tail = tail_.load(std::memory_order_acquire);
+        return BUFFER_SIZE - (tail & BUFFER_MASK);
     }
 
     // Clear buffer from consumer side (call before starting new stream)
-    void consumerClear() {
+    void consumer_clear() {
         // Acquire head, release tail to synchronize with producer
         size_t head = head_.load(std::memory_order_acquire);
         tail_.store(head, std::memory_order_release);
     }
     
     // Clear from producer side (call when stopping stream)
-    void producerClear() {
+    void producer_clear() {
         // Acquire tail, release head to synchronize with consumer
         size_t tail = tail_.load(std::memory_order_acquire);
         head_.store(tail, std::memory_order_release);
     }
 
 private:
-    static size_t readAvailable(size_t head, size_t tail) {
+    static size_t read_available(size_t head, size_t tail) {
         return head - tail;
     }
 
-    static size_t writeAvailable(size_t head, size_t tail) {
+    static size_t write_available(size_t head, size_t tail) {
         return BUFFER_SIZE - (head - tail) - 1; // -1 to distinguish full from empty
     }
 
