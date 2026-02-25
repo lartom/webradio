@@ -5,12 +5,6 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# Option to enable MusicBrainz metadata fetching
-option(ENABLE_MUSICBRAINZ "Enable MusicBrainz metadata fetching" OFF)
-
-# Option to enable metadata debug view
-option(METADATA_DEBUG_VIEW "Enable metadata debug panel" OFF)
-
 include(FetchContent)
 FetchContent_Declare(
     nlohmann_json
@@ -19,25 +13,6 @@ FetchContent_Declare(
     GIT_SHALLOW TRUE
 )
 FetchContent_MakeAvailable(nlohmann_json)
-
-# Fetch and build libcurl if MusicBrainz is enabled
-if(ENABLE_MUSICBRAINZ)
-    FetchContent_Declare(
-        curl
-        GIT_REPOSITORY https://github.com/curl/curl.git
-        GIT_TAG curl-8_5_0
-        GIT_SHALLOW TRUE
-    )
-    
-    # Configure curl build options for static library
-    set(CURL_ENABLE_SSL ON CACHE BOOL "" FORCE)
-    set(CURL_USE_OPENSSL ON CACHE BOOL "" FORCE)
-    set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
-    set(BUILD_CURL_EXE OFF CACHE BOOL "" FORCE)
-    set(HTTP_ONLY ON CACHE BOOL "" FORCE)  # Only HTTP/HTTPS support needed
-    
-    FetchContent_MakeAvailable(curl)
-endif()
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(FFMPEG REQUIRED
@@ -48,13 +23,7 @@ pkg_check_modules(FFMPEG REQUIRED
 )
 pkg_check_modules(NCURSESW REQUIRED ncursesw)
 
-# Determine source files based on options
-set(RADIO_PLAYER_SOURCES src/webradio.cpp src/tui.cpp src/fft_spectrum.cpp)
-if(ENABLE_MUSICBRAINZ)
-    list(APPEND RADIO_PLAYER_SOURCES src/metadata_fetcher.cpp)
-endif()
-
-add_executable(webradio ${RADIO_PLAYER_SOURCES})
+add_executable(webradio src/webradio.cpp src/tui.cpp src/fft_spectrum.cpp)
 
 target_include_directories(webradio PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
@@ -68,15 +37,6 @@ target_link_libraries(webradio PRIVATE
     ${FFMPEG_LIBRARIES}
     ${NCURSESW_LIBRARIES}
 )
-
-if(ENABLE_MUSICBRAINZ)
-    target_link_libraries(webradio PRIVATE libcurl_static)
-    target_compile_definitions(webradio PRIVATE ENABLE_MUSICBRAINZ=1)
-endif()
-
-if(METADATA_DEBUG_VIEW)
-    target_compile_definitions(webradio PRIVATE METADATA_DEBUG_VIEW=1)
-endif()
 
 target_compile_options(webradio PRIVATE
     ${FFMPEG_CFLAGS_OTHER}

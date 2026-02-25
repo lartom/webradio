@@ -242,22 +242,31 @@ void FFTSpectrum::update_spectrum() {
     spectrum_data_.updated.store(true, std::memory_order_release);
 }
 
-void FFTSpectrum::process_samples(const int16_t* stereo_samples, size_t frame_count) {
+void FFTSpectrum::push_samples(const int16_t* stereo_samples, size_t frame_count)
+{
+	std::lock_guard<std::mutex> lock(sample_buffer_mutex);
     // Push samples to ring buffer
     sample_buffer_.push_mono(stereo_samples, frame_count);
-    
+} 
+
+void FFTSpectrum::process_samples()
+{
+   
     // Process FFT when we have enough samples
     static auto last_update = std::chrono::steady_clock::now();
     auto now = std::chrono::steady_clock::now();
     auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_update).count();
     
     if (elapsed >= UPDATE_INTERVAL_MS && sample_buffer_.available() >= FFT_SIZE) {
-        // Read block of samples
-        if (sample_buffer_.read_block(fft_input_.data(), FFT_SIZE)) {
-            compute_fft();
-            update_spectrum();
-            last_update = now;
-        }
+
+		sample_buffer_mutex.lock();
+		sample_buffer_.read_block(fft_input_.data(), FFT_SIZE);
+		sample_buffer_mutex.unlock();
+
+		// Read block of samples
+        compute_fft();
+        update_spectrum();
+        last_update = now;
     }
 }
 

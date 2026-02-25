@@ -5,7 +5,6 @@
 #include <atomic>
 #include <thread>
 #include <mutex>
-#include <condition_variable>
 #include <queue>
 #include <cstring>
 #include <chrono>
@@ -21,14 +20,12 @@
 
 using namespace std::chrono_literals;
 
-// FFmpeg logging control - define FFMPEG_DEBUG_LOGGING to enable
 #ifndef FFMPEG_DEBUG_LOGGING
 static void suppress_ffmpeg_logging(void* ptr, int level, const char* fmt, va_list vl) {
     (void)ptr;
     (void)level;
     (void)fmt;
     (void)vl;
-    // Suppress all FFmpeg logging
 }
 #endif
 
@@ -46,14 +43,12 @@ extern "C" {
 
 using json = nlohmann::json;
 
-// Global state
 std::atomic<bool> g_running{true};
 std::atomic<bool> g_playing{false};
-std::atomic<float> g_volume{1.0f};  // 0.0 to 1.0
+std::atomic<float> g_volume{1.0f};
 std::string g_current_metadata;
 std::string g_current_station_name;
 
-// Thread-safe metadata updates for TUI (ncurses is not thread-safe)
 struct PendingMetadataUpdate {
     std::string title;
     std::string station;
@@ -62,12 +57,10 @@ struct PendingMetadataUpdate {
 std::mutex g_metadata_mutex;
 PendingMetadataUpdate g_pending_metadata;
 
-// Thread-safe buffer status updates
-std::atomic<int> g_pending_buffer_percent{-1};  // -1 means no update
+std::atomic<int> g_pending_buffer_percent{-1};
 std::atomic<bool> g_pending_playing_state{false};
 std::atomic<bool> g_has_playing_state_update{false};
 
-// Thread-safe stream info updates
 struct PendingStreamInfo {
     std::string format;
     int kbps = 0;
@@ -76,26 +69,14 @@ struct PendingStreamInfo {
 std::mutex g_stream_info_mutex;
 PendingStreamInfo g_pending_stream_info;
 
-// Thread-safe stream genre updates
 std::atomic<bool> g_pending_genre_update{false};
 std::string g_pending_genre;
 
-// Real-time bandwidth tracking
 std::atomic<uint64_t> g_bytes_received{0};
 std::atomic<uint64_t> g_last_bandwidth_update{0};
 std::atomic<int> g_current_kbps{0};
 
-#ifdef ENABLE_MUSICBRAINZ
-// MusicBrainz metadata fetcher
-std::unique_ptr<metadata::MusicBrainzFetcher> g_metadata_fetcher;
-std::string g_current_artist;
-std::string g_current_song_title;
-#endif
-
-// TUI instance
 std::unique_ptr<RadioTUI> g_tui;
-
-// FFT spectrum analyzer
 std::unique_ptr<FFTSpectrum> g_fft_spectrum;
 
 void signal_handler(int) {
@@ -111,15 +92,11 @@ void data_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uin
     uint8_t* output = static_cast<uint8_t*>(pOutput);
     constexpr size_t bytesPerFrame = 4;
     size_t bytesToWrite = static_cast<size_t>(frameCount) * bytesPerFrame;
-    
+   
+	// copy PCM data to audio playback buffer
     size_t bytesRead = buffer->read(output, bytesToWrite);
-    
-    if (bytesRead < bytesToWrite) {
-        std::memset(output + bytesRead, 0, bytesToWrite - bytesRead);
-    }
-    
-    // Apply volume scaling to 16-bit stereo samples
-    if (bytesRead > 0) {
+
+	if (bytesRead > 0) {
         float volume = g_volume.load();
         if (volume < 0.99f) {
             int16_t* samples = reinterpret_cast<int16_t*>(output);
@@ -130,10 +107,9 @@ void data_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uin
         }
     }
     
-    // Feed samples to FFT spectrum analyzer
     if (g_fft_spectrum && bytesRead > 0) {
         const int16_t* samples = reinterpret_cast<const int16_t*>(output);
-        g_fft_spectrum->process_samples(samples, bytesRead / bytesPerFrame);
+        g_fft_spectrum->push_samples(samples, bytesRead / bytesPerFrame);
     }
 }
 
@@ -170,7 +146,6 @@ public:
         stop_requested_ = false;
         g_playing = true;
         
-        // Signal main thread to update TUI (ncurses is not thread-safe)
         g_pending_playing_state = true;
         g_has_playing_state_update = true;
         
@@ -187,7 +162,6 @@ public:
             playback_thread_.join();
         }
         
-        // Signal main thread to update TUI (ncurses is not thread-safe)
         g_pending_playing_state = false;
         g_has_playing_state_update = true;
     }
@@ -202,21 +176,17 @@ private:
         bool metadata_updated = false;
         std::string new_title;
         
-        // Helper lambda to check metadata in both stream and format contexts
         auto check_metadata = [&](const char* key) -> AVDictionaryEntry* {
             AVDictionaryEntry* t = nullptr;
-            // First check stream-level metadata (for ICY)
             if (audio_stream_idx >= 0 && fmt_ctx->streams[audio_stream_idx]) {
                 t = av_dict_get(fmt_ctx->streams[audio_stream_idx]->metadata, key, nullptr, 0);
             }
-            // Fallback to format-level metadata
             if (!t) {
                 t = av_dict_get(fmt_ctx->metadata, key, nullptr, 0);
             }
             return t;
         };
         
-        // Check for ICY metadata (StreamTitle)
         tag = check_metadata("StreamTitle");
         if (tag && tag->value) {
             new_title = tag->value;
@@ -229,7 +199,6 @@ private:
             }
         }
         
-        // Check for TITLE
         if (!metadata_updated) {
             tag = check_metadata("TITLE");
             if (tag && tag->value && strlen(tag->value) > 0) {
@@ -241,7 +210,6 @@ private:
             }
         }
         
-        // Check for artist/title combination
         std::string artist;
         std::string title;
         
@@ -261,7 +229,6 @@ private:
             }
         }
         
-        // If we have a title but no artist, try to parse from ICY format "Artist - Title"
         if (metadata_updated && artist.empty() && !new_title.empty()) {
             size_t separator_pos = new_title.find(" - ");
             if (separator_pos != std::string::npos) {
@@ -273,28 +240,14 @@ private:
         }
         
         if (metadata_updated) {
-            // Queue metadata update for main thread to handle (ncurses is not thread-safe)
             std::lock_guard<std::mutex> lock(g_metadata_mutex);
             g_pending_metadata.title = g_current_metadata;
-            
-#ifdef ENABLE_MUSICBRAINZ
-            // Store artist/title for metadata fetching
-            g_current_artist = artist;
-            g_current_song_title = title;
-            
-            // Request metadata from MusicBrainz
-            if (g_metadata_fetcher) {
-                g_metadata_fetcher->request(artist, title);
-            }
-#endif
             g_pending_metadata.station = g_current_station_name;
             g_pending_metadata.pending = true;
             
-            // Extract and send stream genre if available
             if (fmt_ctx) {
                 AVDictionaryEntry* genre_tag = nullptr;
                 
-                // Look for genre in stream-level metadata first (ICY)
                 if (audio_stream_idx >= 0 && fmt_ctx->streams[audio_stream_idx]) {
                     genre_tag = av_dict_get(fmt_ctx->streams[audio_stream_idx]->metadata, "genre", nullptr, 0);
                     if (!genre_tag) {
@@ -302,7 +255,6 @@ private:
                     }
                 }
                 
-                // Fallback to format-level metadata
                 if (!genre_tag) {
                     genre_tag = av_dict_get(fmt_ctx->metadata, "genre", nullptr, 0);
                 }
@@ -315,29 +267,6 @@ private:
                     g_pending_genre_update = true;
                 }
             }
-            
-#ifdef METADATA_DEBUG_VIEW
-            // Queue debug metadata for main thread (ncurses is not thread-safe)
-            if (g_tui && fmt_ctx) {
-                g_tui->clear_debug_metadata();
-                AVDictionaryEntry* tag = nullptr;
-                
-                // Format-level metadata
-                while ((tag = av_dict_get(fmt_ctx->metadata, "", tag, AV_DICT_IGNORE_SUFFIX))) {
-                    std::string key = std::string("[FMT] ") + tag->key;
-                    g_tui->queue_debug_metadata(key, tag->value);
-                }
-                
-                // Stream-level metadata
-                tag = nullptr;
-                if (audio_stream_idx >= 0 && fmt_ctx->streams[audio_stream_idx]) {
-                    while ((tag = av_dict_get(fmt_ctx->streams[audio_stream_idx]->metadata, "", tag, AV_DICT_IGNORE_SUFFIX))) {
-                        std::string key = std::string("[STR] ") + tag->key;
-                        g_tui->queue_debug_metadata(key, tag->value);
-                    }
-                }
-            }
-#endif
         }
     }
     
@@ -397,12 +326,9 @@ private:
             return false;
         }
         
-        // Get stream format info
         {
             std::lock_guard<std::mutex> lock(g_stream_info_mutex);
-            // Format: "CODEC BITRATEkbps" (e.g., "MP3 128kbps")
             std::string codec_name = codec->name;
-            // Capitalize first letter
             if (!codec_name.empty()) {
                 codec_name[0] = std::toupper(codec_name[0]);
             }
@@ -477,7 +403,6 @@ private:
             return false;
         }
         
-        // Pre-buffering
         audio_buffer_.consumerClear();
         constexpr size_t PREBUFFER_TARGET = 65536;
         
@@ -524,7 +449,6 @@ private:
             }
             av_packet_unref(packet);
             
-            // Update buffer percent for main thread (ncurses is not thread-safe)
             size_t filled = audio_buffer_.readAvailable();
             int percent = static_cast<int>((filled * 100) / PREBUFFER_TARGET);
             if (percent > 100) percent = 100;
@@ -552,7 +476,6 @@ private:
             return false;
         }
         
-        // Main playback loop
         int metadata_counter = 0;
         uint64_t bytes_accumulated = 0;
         auto last_calc = std::chrono::steady_clock::now();
@@ -561,51 +484,24 @@ private:
             ret = av_read_frame(fmt_ctx, packet);
             if (ret < 0) break;
             
-            // Track bandwidth
             bytes_accumulated += packet->size;
             
-            // Calculate KiB/s every second
             auto now = std::chrono::steady_clock::now();
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_calc).count();
             if (elapsed >= 1000) {
                 int kbps = static_cast<int>((bytes_accumulated * 1000) / (elapsed * 1024));
                 g_current_kbps.store(kbps);
 
-                // Queue stream info update for main thread (ncurses is not thread-safe)
                 {
                     std::lock_guard<std::mutex> lock(g_stream_info_mutex);
                     g_pending_stream_info.kbps = kbps;
                     g_pending_stream_info.pending = true;
                 }
 
-#ifdef METADATA_DEBUG_VIEW
-                // Queue debug metadata for main thread (ncurses is not thread-safe)
-                if (g_tui) {
-                    g_tui->clear_debug_metadata();
-                    AVDictionaryEntry* tag = nullptr;
-
-                    // Format-level metadata
-                    while ((tag = av_dict_get(fmt_ctx->metadata, "", tag, AV_DICT_IGNORE_SUFFIX))) {
-                        std::string key = std::string("[FMT] ") + tag->key;
-                        g_tui->queue_debug_metadata(key, tag->value);
-                    }
-
-                    // Stream-level metadata
-                    tag = nullptr;
-                    if (audio_stream_idx >= 0 && fmt_ctx->streams[audio_stream_idx]) {
-                        while ((tag = av_dict_get(fmt_ctx->streams[audio_stream_idx]->metadata, "", tag, AV_DICT_IGNORE_SUFFIX))) {
-                            std::string key = std::string("[STR] ") + tag->key;
-                            g_tui->queue_debug_metadata(key, tag->value);
-                        }
-                    }
-                }
-#endif
-
                 bytes_accumulated = 0;
                 last_calc = now;
             }
             
-            // Check metadata frequently (every 5 packets for ICY metadata)
             if (++metadata_counter % 5 == 0) {
                 update_metadata_tui(fmt_ctx, audio_stream_idx);
             }
@@ -664,7 +560,6 @@ private:
 };
 
 int main(int argc, char* argv[]) {
-    // Disable FFmpeg logging unless FFMPEG_DEBUG_LOGGING is defined
 #ifndef FFMPEG_DEBUG_LOGGING
     av_log_set_callback(suppress_ffmpeg_logging);
 #endif
@@ -683,77 +578,27 @@ int main(int argc, char* argv[]) {
         return 1;
     }
     
-    // Initialize TUI
     g_tui = std::make_unique<RadioTUI>();
     if (!g_tui->init()) {
         std::cerr << "Failed to initialize TUI" << std::endl;
         return 1;
     }
     
-    // Initialize FFT spectrum analyzer
     g_fft_spectrum = std::make_unique<FFTSpectrum>();
-    
-#ifdef ENABLE_MUSICBRAINZ
-    // Initialize MusicBrainz metadata fetcher
-    g_metadata_fetcher = std::make_unique<metadata::MusicBrainzFetcher>();
-#ifdef METADATA_DEBUG_VIEW
-    // Set up status callback for debug view
-    g_metadata_fetcher->setStatusCallback([](const std::string& status,
-                                             const std::string& query,
-                                             const std::string& album,
-                                             const std::string& year,
-                                             const std::string& genre,
-                                             int score,
-                                             bool has_result,
-                                             const std::string& error_message) {
-        if (g_tui) {
-            g_tui->update_musicbrainz_debug(status, query, album, year, genre, score, has_result, error_message);
-        }
-    });
-#endif
-    g_metadata_fetcher->start();
-#endif
     
     g_tui->set_stations(stations);
     
-    // Create audio player
     AudioPlayer player;
     
-    // Set up callbacks
-    g_tui->set_on_station_select([&player, &stations](const Station& station) {
-#ifdef ENABLE_MUSICBRAINZ
-        // Clear previous track metadata when selecting new station
-        if (g_tui) {
-            g_tui->update_track_metadata("", "", "");
-        }
-        g_current_artist.clear();
-        g_current_song_title.clear();
-#endif
-        // Clear stream genre
+    g_tui->set_on_station_select([&player](const Station& station) {
         if (g_tui) {
             g_tui->update_stream_genre("");
         }
-#ifdef METADATA_DEBUG_VIEW
-        // Clear debug metadata
-        if (g_tui) {
-            g_tui->clear_debug_metadata();
-            g_tui->update_musicbrainz_debug("Waiting...");
-        }
-#endif
         player.play(station.url, station.name);
     });
     
     g_tui->set_on_stop([&player]() {
         player.stop();
-#ifdef ENABLE_MUSICBRAINZ
-        // Clear current track metadata
-        g_current_artist.clear();
-        g_current_song_title.clear();
-        if (g_tui) {
-            g_tui->update_track_metadata("", "", "");
-        }
-#endif
-        // Clear stream genre
         if (g_tui) {
             g_tui->update_stream_genre("");
         }
@@ -781,32 +626,26 @@ int main(int argc, char* argv[]) {
         }
     });
     
-    // Initial draw
     g_tui->draw_all();
     
-    // Main event loop
     while (g_running) {
         int ch = g_tui->get_input();
         if (ch != ERR) {
             g_tui->handle_input(ch);
         }
         
-        // Check for pending TUI updates (must be done in main thread for ncurses safety)
         {
-            // Handle playing state changes
             if (g_has_playing_state_update && g_tui) {
                 g_tui->set_playing(g_pending_playing_state);
                 g_has_playing_state_update = false;
             }
             
-            // Handle buffer updates
             int buffer_percent = g_pending_buffer_percent.load();
             if (buffer_percent >= 0 && g_tui) {
                 g_tui->update_buffer(buffer_percent);
-                g_pending_buffer_percent = -1;  // Reset
+                g_pending_buffer_percent = -1;
             }
             
-            // Handle metadata updates
             std::string meta_title;
             std::string meta_station;
             bool has_meta_update = false;
@@ -822,15 +661,10 @@ int main(int argc, char* argv[]) {
             }
             
             if (has_meta_update && g_tui) {
-#ifdef ENABLE_MUSICBRAINZ
-                // Clear previous track metadata when new song starts
-                g_tui->update_track_metadata("", "", "");
-#endif
                 g_tui->update_metadata(meta_title, meta_station);
                 g_tui->add_to_history(meta_title, meta_station);
             }
             
-            // Handle stream info updates
             std::string stream_format;
             int stream_kbps = 0;
             bool has_stream_update = false;
@@ -849,61 +683,29 @@ int main(int argc, char* argv[]) {
                 g_tui->update_stream_info(stream_format, stream_kbps);
             }
             
-            // Handle genre updates
             if (g_pending_genre_update && g_tui) {
                 g_tui->update_stream_genre(g_pending_genre);
                 g_pending_genre_update = false;
             }
-            
-#ifdef ENABLE_MUSICBRAINZ
-            // Check for MusicBrainz metadata results
-            if (g_metadata_fetcher && g_tui && !g_current_artist.empty() && !g_current_song_title.empty()) {
-                if (g_metadata_fetcher->hasResult(g_current_artist, g_current_song_title)) {
-                    auto track_info = g_metadata_fetcher->getResult(g_current_artist, g_current_song_title);
-                    if (track_info.available) {
-                        g_tui->update_track_metadata(track_info.album, track_info.year, track_info.genre);
-                    }
-                }
-            }
-#endif
+			
+			if(g_fft_spectrum)
+			{
+				g_fft_spectrum->process_samples();
+	            if (g_fft_spectrum->has_new_data() && g_tui) {
+		            std::array<float, FFTSpectrum::NUM_BARS> spectrum_bars;
+			        bool updated = false;
+				    g_fft_spectrum->get_spectrum(spectrum_bars, updated);
+					if (updated) {
+						g_tui->update_spectrum(spectrum_bars);
+					}
+				}
+			}
+       }
 
-#ifdef METADATA_DEBUG_VIEW
-            // Process pending debug metadata from playback thread
-            if (g_tui) {
-                g_tui->process_pending_debug_metadata();
-            }
-            
-            // Check if debug view needs redraw
-            if (g_tui && g_tui->needsDebugRedraw()) {
-                g_tui->draw_debug();
-            }
-#endif
-            
-            // Handle spectrum visualization updates
-            if (g_fft_spectrum && g_fft_spectrum->has_new_data() && g_tui) {
-                std::array<float, FFTSpectrum::NUM_BARS> spectrum_bars;
-                bool updated = false;
-                g_fft_spectrum->get_spectrum(spectrum_bars, updated);
-                if (updated) {
-                    g_tui->update_spectrum(spectrum_bars);
-                }
-            }
-        }
-
-        // Small sleep to prevent CPU spinning
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
     
-    // Cleanup
     player.stop();
-    
-#ifdef ENABLE_MUSICBRAINZ
-    // Stop metadata fetcher
-    if (g_metadata_fetcher) {
-        g_metadata_fetcher->stop();
-        g_metadata_fetcher.reset();
-    }
-#endif
     
     g_tui->cleanup();
     

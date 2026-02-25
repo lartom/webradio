@@ -27,9 +27,6 @@ A terminal-based internet radio player built with FFmpeg and ncurses. Stream liv
   - libswresample
 - ncursesw
 
-### Optional
-- libcurl (for MusicBrainz metadata fetching)
-
 ## Building
 
 ### Basic Build
@@ -44,19 +41,7 @@ cmake -B build -S . -DCMAKE_BUILD_TYPE=Debug
 cmake --build build
 ```
 
-### Build Options
 
-| Option | Description |
-|--------|-------------|
-| `-DENABLE_MUSICBRAINZ=ON` | Enable MusicBrainz metadata lookup |
-| `-DMETADATA_DEBUG_VIEW=ON` | Show raw metadata debug panel |
-
-### Full-Featured Build Example
-
-```bash
-cmake -B build -S . -DCMAKE_BUILD_TYPE=Debug -DENABLE_MUSICBRAINZ=ON -DMETADATA_DEBUG_VIEW=ON
-cmake --build build
-```
 
 ### Clean Rebuild
 
@@ -98,17 +83,6 @@ cd build && ./webradio ../stations.json
 | `+/-` or `[/]` | Volume up/down |
 | `q` | Quit |
 
-## Project Structure
-
-```
-src/
-  webradio.cpp       - Main application entry point
-  tui.hpp/cpp        - Terminal UI (ncurses)
-  fft_spectrum.hpp/cpp - FFT audio visualization
-  byte_ringbuffer.hpp  - Lock-free ring buffer
-  metadata_fetcher.hpp/cpp - MusicBrainz integration
-  miniaudio.h        - Audio output library
-```
 
 ## License
 

@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <vector>
+#include <mutex>	
 
 // Simple FFT implementation using DFT (no external dependencies)
 // Optimized for real-time audio visualization
@@ -26,7 +27,9 @@ public:
     ~FFTSpectrum();
     
     // Called from audio callback thread - lock-free
-    void process_samples(const int16_t* stereo_samples, size_t frame_count);
+ 	void push_samples(const int16_t* stereo_samples, size_t frame_count);
+ 
+	void process_samples();
     
     // Called from main thread to get latest spectrum
     void get_spectrum(std::array<float, NUM_BARS>& out_bars, bool& out_updated);
@@ -47,6 +50,7 @@ private:
         size_t available() const;
     };
     
+	std::mutex sample_buffer_mutex;
     SampleBuffer sample_buffer_;
     SpectrumData spectrum_data_;
     

@@ -90,42 +90,15 @@ void RadioTUI::setup_colors() {
 void RadioTUI::create_windows() {
     getmaxyx(stdscr, max_y_, max_x_);
 
-    // Header: 1 line at top
     header_win_ = newwin(1, max_x_, 0, 0);
 
-#ifdef METADATA_DEBUG_VIEW
-    // Calculate debug panel height based on metadata count (grows dynamically)
-    std::lock_guard<std::mutex> lock(debug_metadata_mutex_);
-    int desired_height = std::min(DEBUG_WIN_MAX_HEIGHT,
-                                  std::max(DEBUG_WIN_MIN_HEIGHT,
-                                           static_cast<int>(debug_metadata_.size()) + 2));
-    current_debug_height_ = desired_height;
-
-    // Debug panel at bottom (when enabled)
-    debug_win_ = newwin(current_debug_height_, max_x_, max_y_ - current_debug_height_, 0);
-
-    // Controls: 1 line above debug panel
-    controls_win_ = newwin(1, max_x_, max_y_ - current_debug_height_ - 1, 0);
-
-    // Station panel: left side
-    int content_height = max_y_ - 2 - current_debug_height_;
-    station_win_ = newwin(content_height, station_width_, 1, 0);
-
-    // Main panel: right side
-    int main_width = max_x_ - station_width_;
-    main_win_ = newwin(content_height, main_width, 1, station_width_);
-#else
-    // Controls: 1 line at bottom
     controls_win_ = newwin(1, max_x_, max_y_ - 1, 0);
 
-    // Station panel: left side, wider for full names
     int content_height = max_y_ - 2;
     station_win_ = newwin(content_height, station_width_, 1, 0);
 
-    // Main panel: right side
     int main_width = max_x_ - station_width_;
     main_win_ = newwin(content_height, main_width, 1, station_width_);
-#endif
 }
 
 void RadioTUI::destroy_windows() {
@@ -133,10 +106,6 @@ void RadioTUI::destroy_windows() {
     if (station_win_) delwin(station_win_);
     if (main_win_) delwin(main_win_);
     if (controls_win_) delwin(controls_win_);
-#ifdef METADATA_DEBUG_VIEW
-    if (debug_win_) delwin(debug_win_);
-    debug_win_ = nullptr;
-#endif
     header_win_ = station_win_ = main_win_ = controls_win_ = nullptr;
 }
 
@@ -199,236 +168,6 @@ void RadioTUI::update_spectrum(const std::array<float, FFTSpectrum::NUM_BARS>& b
     }
 }
 
-#ifdef METADATA_DEBUG_VIEW
-void RadioTUI::update_debug_metadata(const std::string& key, const std::string& value) {
-    {
-        std::lock_guard<std::mutex> lock(debug_metadata_mutex_);
-
-        // Check if key already exists and update it
-        for (auto& entry : debug_metadata_) {
-            if (entry.first == key) {
-                entry.second = value;
-                return;
-            }
-        }
-
-        // Add new entry
-        debug_metadata_.push_back({key, value});
-
-        // Calculate required height for both columns
-        // Left column: stream metadata count
-        int left_lines = static_cast<int>(debug_metadata_.size());
-
-        // Right column: MusicBrainz info (minimum 3 lines for status + spacing)
-        int right_lines = 3;
-
-        // Use the maximum of both columns, plus headers and borders
-        int content_lines = std::max(left_lines, right_lines);
-        int desired_height = std::min(DEBUG_WIN_MAX_HEIGHT,
-                                      std::max(DEBUG_WIN_MIN_HEIGHT, content_lines + 3));
-
-        // If height changed, recreate windows
-        if (desired_height != current_debug_height_) {
-            current_debug_height_ = desired_height;
-        } else {
-            return;
-        }
-    }
-
-    // Recreate windows outside the lock
-    destroy_windows();
-    create_windows();
-    draw_all();
-}
-
-void RadioTUI::clear_debug_metadata() {
-    {
-        std::lock_guard<std::mutex> lock(debug_metadata_mutex_);
-        debug_metadata_.clear();
-
-        // Reset panel to minimum height
-        int desired_height = DEBUG_WIN_MIN_HEIGHT;
-        if (desired_height != current_debug_height_) {
-            current_debug_height_ = desired_height;
-        } else {
-            return; // No need to recreate windows
-        }
-    }
-
-    // Recreate windows outside the lock
-    destroy_windows();
-    create_windows();
-    draw_all();
-}
-
-void RadioTUI::queue_debug_metadata(const std::string& key, const std::string& value) {
-    std::lock_guard<std::mutex> lock(pending_debug_mutex_);
-    pending_debug_metadata_.push_back({key, value});
-    has_pending_debug_metadata_ = true;
-}
-
-void RadioTUI::process_pending_debug_metadata() {
-    if (!has_pending_debug_metadata_.load()) return;
-    
-    std::vector<std::pair<std::string, std::string>> items;
-    {
-        std::lock_guard<std::mutex> lock(pending_debug_mutex_);
-        items = std::move(pending_debug_metadata_);
-        pending_debug_metadata_.clear();
-        has_pending_debug_metadata_ = false;
-    }
-    
-    for (const auto& [key, value] : items) {
-        update_debug_metadata(key, value);
-    }
-}
-
-void RadioTUI::update_musicbrainz_debug(const std::string& status,
-                                        const std::string& query,
-                                        const std::string& album,
-                                        const std::string& year,
-                                        const std::string& genre,
-                                        int score,
-                                        bool has_result,
-                                        const std::string& error_message) {
-    std::lock_guard<std::mutex> lock(mbz_debug_mutex_);
-    mbz_debug_info_.status = status;
-    mbz_debug_info_.query = query;
-    mbz_debug_info_.album = album;
-    mbz_debug_info_.year = year;
-    mbz_debug_info_.genre = genre;
-    mbz_debug_info_.score = score;
-    mbz_debug_info_.has_result = has_result;
-    mbz_debug_info_.error_message = error_message;
-    debug_needs_redraw_ = true;
-}
-
-void RadioTUI::draw_debug() {
-    if (!debug_win_) return;
-
-    werase(debug_win_);
-
-    // Draw border
-    wattron(debug_win_, COLOR_PAIR(color_border_));
-    box(debug_win_, 0, 0);
-    wattroff(debug_win_, COLOR_PAIR(color_border_));
-
-    // Title
-    std::string title = " METADATA DEBUG ";
-    mvwaddstr(debug_win_, 0, (max_x_ - title.length()) / 2, title.c_str());
-
-    // Draw vertical separator for two columns
-    int col_width = (max_x_ - 4) / 2;
-    int separator_x = 2 + col_width + 1;
-
-    wattron(debug_win_, COLOR_PAIR(color_border_));
-    for (int y = 1; y < current_debug_height_ - 1; ++y) {
-        mvwaddch(debug_win_, y, separator_x, ACS_VLINE);
-    }
-    // Draw column headers
-    mvwaddstr(debug_win_, 1, 4, "[STREAM]");
-    mvwaddstr(debug_win_, 1, separator_x + 2, "[MUSICBRAINZ]");
-    wattroff(debug_win_, COLOR_PAIR(color_border_));
-
-    // Left column: Stream metadata
-    {
-        std::lock_guard<std::mutex> lock(debug_metadata_mutex_);
-        int y = 3;
-        int max_display = current_debug_height_ - 2;
-
-        for (size_t i = 0; i < debug_metadata_.size() && y < max_display; ++i) {
-            const auto& entry = debug_metadata_[i];
-            std::string line = entry.first + ": " + entry.second;
-
-            // Truncate if too long for column
-            int max_len = col_width - 2;
-            if (static_cast<int>(line.length()) > max_len) {
-                line = line.substr(0, max_len - 3) + "...";
-            }
-
-            mvwaddstr(debug_win_, y++, 3, line.c_str());
-        }
-    }
-
-    // Right column: MusicBrainz debug info
-    {
-        std::lock_guard<std::mutex> lock(mbz_debug_mutex_);
-        int y = 3;
-        int x = separator_x + 2;
-        int max_len = max_x_ - x - 2;
-
-        // Status with color
-        if (has_colors()) {
-            if (mbz_debug_info_.status == "Received") {
-                wattron(debug_win_, COLOR_PAIR(color_history_station_));  // Green for success
-            } else if (mbz_debug_info_.status == "Error" || mbz_debug_info_.status == "Not found") {
-                wattron(debug_win_, COLOR_PAIR(color_stopped_));  // Red for error
-            } else {
-                wattron(debug_win_, COLOR_PAIR(color_controls_));  // Cyan for pending
-            }
-        }
-        std::string status_line = "Status: " + mbz_debug_info_.status;
-        if (static_cast<int>(status_line.length()) > max_len) {
-            status_line = status_line.substr(0, max_len - 3) + "...";
-        }
-        mvwaddstr(debug_win_, y++, x, status_line.c_str());
-        if (has_colors()) {
-            wattroff(debug_win_, COLOR_PAIR(color_history_station_));
-            wattroff(debug_win_, COLOR_PAIR(color_stopped_));
-            wattroff(debug_win_, COLOR_PAIR(color_controls_));
-        }
-
-        // Query
-        if (!mbz_debug_info_.query.empty()) {
-            std::string query_line = "Query: " + mbz_debug_info_.query;
-            if (static_cast<int>(query_line.length()) > max_len) {
-                query_line = query_line.substr(0, max_len - 3) + "...";
-            }
-            mvwaddstr(debug_win_, y++, x, query_line.c_str());
-        }
-
-        // Empty line separator
-        y++;
-
-        // Results (only if received)
-        if (mbz_debug_info_.has_result) {
-            if (!mbz_debug_info_.album.empty()) {
-                std::string album_line = "Album: " + mbz_debug_info_.album;
-                if (static_cast<int>(album_line.length()) > max_len) {
-                    album_line = album_line.substr(0, max_len - 3) + "...";
-                }
-                mvwaddstr(debug_win_, y++, x, album_line.c_str());
-            }
-
-            if (!mbz_debug_info_.year.empty()) {
-                mvwaddstr(debug_win_, y++, x, ("Year: " + mbz_debug_info_.year).c_str());
-            }
-
-            if (!mbz_debug_info_.genre.empty()) {
-                mvwaddstr(debug_win_, y++, x, ("Genre: " + mbz_debug_info_.genre).c_str());
-            }
-
-            mvwaddstr(debug_win_, y++, x, ("Score: " + std::to_string(mbz_debug_info_.score)).c_str());
-        } else if (!mbz_debug_info_.error_message.empty()) {
-            // Show error message
-            std::string err_line = "Error: " + mbz_debug_info_.error_message;
-            if (static_cast<int>(err_line.length()) > max_len) {
-                err_line = err_line.substr(0, max_len - 3) + "...";
-            }
-            if (has_colors()) {
-                wattron(debug_win_, COLOR_PAIR(color_stopped_));
-            }
-            mvwaddstr(debug_win_, y++, x, err_line.c_str());
-            if (has_colors()) {
-                wattroff(debug_win_, COLOR_PAIR(color_stopped_));
-            }
-        }
-    }
-
-    wrefresh(debug_win_);
-}
-#endif
-
 void RadioTUI::add_to_history(const std::string& title, const std::string& station) {
     {
         std::lock_guard<std::mutex> lock(history_mutex_);
@@ -447,7 +186,6 @@ void RadioTUI::add_to_history(const std::string& title, const std::string& stati
 }
 
 void RadioTUI::draw_all() {
-    // Clear and refresh stdscr first
     clear();
     refresh();
 
@@ -455,12 +193,8 @@ void RadioTUI::draw_all() {
     draw_stations();
     draw_main();
     draw_controls();
-#ifdef METADATA_DEBUG_VIEW
-    draw_debug();
-#endif
     refresh_all();
 
-    // Force a full screen update
     refresh();
 }
 
