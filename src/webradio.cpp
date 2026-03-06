@@ -18,6 +18,14 @@
 #include "tui.hpp"
 #include "fft_spectrum.hpp"
 
+#ifdef WEBRADIO_USE_SSE2
+#ifdef _MSC_VER
+#include <intrin.h>
+#else
+#include <emmintrin.h>
+#endif
+#endif
+
 using namespace std::chrono_literals;
 
 #ifndef FFMPEG_DEBUG_LOGGING
@@ -49,32 +57,23 @@ std::atomic<float> g_volume{1.0f};
 std::string g_current_metadata;
 std::string g_current_station_name;
 
-struct PendingMetadataUpdate {
-    std::string title;
-    std::string station;
-    bool pending = false;
-};
+
+uint64_t g_bytes_accumulated = 0;
+auto g_last_kbps_calc = std::chrono::steady_clock::now();
+
 std::mutex g_metadata_mutex;
-PendingMetadataUpdate g_pending_metadata;
+StreamMetadata g_pending_metadata;
 
 std::atomic<int> g_pending_buffer_percent{-1};
 std::atomic<bool> g_pending_playing_state{false};
 std::atomic<bool> g_has_playing_state_update{false};
 
-struct PendingStreamInfo {
-    std::string format;
-    int kbps = 0;
-    bool pending = false;
-};
-std::mutex g_stream_info_mutex;
-PendingStreamInfo g_pending_stream_info;
 
-std::atomic<bool> g_pending_genre_update{false};
-std::string g_pending_genre;
+//std::atomic<bool> g_pending_genre_update{false};
+//std::string g_pending_genre;
 
 std::atomic<uint64_t> g_bytes_received{0};
 std::atomic<uint64_t> g_last_bandwidth_update{0};
-std::atomic<int> g_current_kbps{0};
 
 std::unique_ptr<RadioTUI> g_tui;
 std::unique_ptr<FFTSpectrum> g_fft_spectrum;
@@ -97,15 +96,39 @@ void data_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uin
     size_t bytesRead = buffer->read(output, bytesToWrite);
 
 	if (bytesRead > 0) {
-        float volume = g_volume.load();
-        if (volume < 0.99f) {
-            int16_t* samples = reinterpret_cast<int16_t*>(output);
-            size_t sampleCount = bytesRead / 2;
-            for (size_t i = 0; i < sampleCount; ++i) {
-                samples[i] = static_cast<int16_t>(samples[i] * volume);
-            }
-        }
-    }
+		float volume = g_volume.load();
+		if (volume < 0.99f) {
+			int16_t* samples = reinterpret_cast<int16_t*>(output);
+			size_t sampleCount = bytesRead / 2;
+
+#ifdef WEBRADIO_USE_SSE2
+			// SSE2: process 8 x int16 per iteration
+			// int16 -> int32 -> float -> scale -> int32 -> int16 (saturated)
+			const __m128 vol_vec = _mm_set1_ps(volume);
+			size_t i = 0;
+			for (; i + 7 < sampleCount; i += 8) {
+				__m128i s16 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(&samples[i]));
+				// Sign-extend int16 -> int32 using arithmetic shift to fill upper bits
+				__m128i sign = _mm_srai_epi16(s16, 15);
+				__m128i lo_i32 = _mm_unpacklo_epi16(s16, sign);
+				__m128i hi_i32 = _mm_unpackhi_epi16(s16, sign);
+				// Convert to float, scale, convert back, pack with saturation
+				__m128i result = _mm_packs_epi32(
+					_mm_cvtps_epi32(_mm_mul_ps(_mm_cvtepi32_ps(lo_i32), vol_vec)),
+					_mm_cvtps_epi32(_mm_mul_ps(_mm_cvtepi32_ps(hi_i32), vol_vec)));
+				_mm_storeu_si128(reinterpret_cast<__m128i*>(&samples[i]), result);
+			}
+			// Scalar tail for remaining samples
+			for (; i < sampleCount; ++i) {
+				samples[i] = static_cast<int16_t>(samples[i] * volume);
+			}
+#else
+			for (size_t i = 0; i < sampleCount; ++i) {
+				samples[i] = static_cast<int16_t>(samples[i] * volume);
+			}
+#endif
+		}
+	}
     
     if (g_fft_spectrum && bytesRead > 0) {
         const int16_t* samples = reinterpret_cast<const int16_t*>(output);
@@ -148,8 +171,8 @@ public:
         
         g_pending_playing_state = true;
         g_has_playing_state_update = true;
-        
-        playback_thread_ = std::thread([this]() {
+
+		playback_thread_ = std::thread([this]() {
             play_stream(current_url_);
         });
     }
@@ -157,11 +180,15 @@ public:
     void stop() {
         stop_requested_ = true;
         g_playing = false;
+
         
         if (playback_thread_.joinable()) {
             playback_thread_.join();
         }
-        
+
+		g_pending_metadata = StreamMetadata{};
+		g_pending_metadata.pending = true;
+
         g_pending_playing_state = false;
         g_has_playing_state_update = true;
     }
@@ -171,106 +198,47 @@ public:
     }
 
 private:
-    void update_metadata_tui(AVFormatContext* fmt_ctx, int audio_stream_idx) {
-        AVDictionaryEntry* tag = nullptr;
-        bool metadata_updated = false;
-        std::string new_title;
-        
-        auto check_metadata = [&](const char* key) -> AVDictionaryEntry* {
-            AVDictionaryEntry* t = nullptr;
-            if (audio_stream_idx >= 0 && fmt_ctx->streams[audio_stream_idx]) {
-                t = av_dict_get(fmt_ctx->streams[audio_stream_idx]->metadata, key, nullptr, 0);
-            }
-            if (!t) {
-                t = av_dict_get(fmt_ctx->metadata, key, nullptr, 0);
-            }
-            return t;
-        };
-        
-        tag = check_metadata("StreamTitle");
-        if (tag && tag->value) {
-            new_title = tag->value;
-            if (new_title.length() > 2 && new_title.front() == '\'' && new_title.back() == '\'') {
-                new_title = new_title.substr(1, new_title.length() - 2);
-            }
-            if (!new_title.empty() && new_title != g_current_metadata) {
-                g_current_metadata = new_title;
-                metadata_updated = true;
-            }
-        }
-        
-        if (!metadata_updated) {
-            tag = check_metadata("TITLE");
-            if (tag && tag->value && strlen(tag->value) > 0) {
-                new_title = tag->value;
-                if (new_title != g_current_metadata) {
-                    g_current_metadata = new_title;
-                    metadata_updated = true;
-                }
-            }
-        }
-        
-        std::string artist;
-        std::string title;
-        
-        if (!metadata_updated) {
-            AVDictionaryEntry* artist_tag = check_metadata("artist");
-            AVDictionaryEntry* title_tag = check_metadata("title");
-            
-            if (artist_tag && title_tag && artist_tag->value && title_tag->value &&
-                strlen(artist_tag->value) > 0 && strlen(title_tag->value) > 0) {
-                artist = artist_tag->value;
-                title = title_tag->value;
-                new_title = artist + " - " + title;
-                if (new_title != g_current_metadata) {
-                    g_current_metadata = new_title;
-                    metadata_updated = true;
-                }
-            }
-        }
-        
-        if (metadata_updated && artist.empty() && !new_title.empty()) {
-            size_t separator_pos = new_title.find(" - ");
-            if (separator_pos != std::string::npos) {
-                artist = new_title.substr(0, separator_pos);
-                title = new_title.substr(separator_pos + 3);
-            } else {
-                title = new_title;
-            }
-        }
-        
-        if (metadata_updated) {
-            std::lock_guard<std::mutex> lock(g_metadata_mutex);
-            g_pending_metadata.title = g_current_metadata;
-            g_pending_metadata.station = g_current_station_name;
-            g_pending_metadata.pending = true;
-            
-            if (fmt_ctx) {
-                AVDictionaryEntry* genre_tag = nullptr;
-                
-                if (audio_stream_idx >= 0 && fmt_ctx->streams[audio_stream_idx]) {
-                    genre_tag = av_dict_get(fmt_ctx->streams[audio_stream_idx]->metadata, "genre", nullptr, 0);
-                    if (!genre_tag) {
-                        genre_tag = av_dict_get(fmt_ctx->streams[audio_stream_idx]->metadata, "icy-genre", nullptr, 0);
-                    }
-                }
-                
-                if (!genre_tag) {
-                    genre_tag = av_dict_get(fmt_ctx->metadata, "genre", nullptr, 0);
-                }
-                if (!genre_tag) {
-                    genre_tag = av_dict_get(fmt_ctx->metadata, "icy-genre", nullptr, 0);
-                }
-                
-                if (genre_tag && genre_tag->value) {
-                    g_pending_genre = genre_tag->value;
-                    g_pending_genre_update = true;
-                }
-            }
-        }
-    }
-    
-    bool play_stream(const std::string& url) {
+	void update_metadata_tui(AVFormatContext * fmt_ctx, int audio_stream_idx)
+	{
+		auto check_metadata = [&](const char* key) -> AVDictionaryEntry*
+		{
+			AVDictionaryEntry* t = nullptr;
+			if (audio_stream_idx >= 0 && fmt_ctx->streams[audio_stream_idx]) {
+				t = av_dict_get(fmt_ctx->streams[audio_stream_idx]->metadata, key, nullptr, 0);
+			}
+			if (!t) {
+				t = av_dict_get(fmt_ctx->metadata, key, nullptr, 0);
+			}
+			return t;
+		};
+
+		// Extract stream title (e.g., "a-ha - The Sun Always Shines on T.V.")
+		if (AVDictionaryEntry* tag = check_metadata("StreamTitle"); tag && tag->value)
+		{
+			if (g_pending_metadata.title != tag->value)
+			{
+				g_pending_metadata.title = tag->value;
+				g_pending_metadata.pending = true; // !g_pending_metadata.title.empty();
+			}
+		}
+
+		// Extract genre information
+		if (AVDictionaryEntry* tag = check_metadata("cy-genre"); tag && tag->value)
+		{
+			if (g_pending_metadata.genre != tag->value)
+			{
+				g_pending_metadata.genre = tag->value;
+				g_pending_metadata.pending = true; // !g_pending_metadata.genre.empty();
+			}
+		}
+
+		//AVDictionaryEntry* artist_tag = check_metadata("artist");
+		//AVDictionaryEntry* title_tag = check_metadata("title");
+	}
+
+
+    bool play_stream(const std::string& url)
+	{
         AVFormatContext* fmt_ctx = nullptr;
         AVDictionary* opts = nullptr;
         av_dict_set(&opts, "icy", "1", 0);
@@ -320,6 +288,7 @@ private:
         }
         
         ret = avcodec_open2(codec_ctx, codec, nullptr);
+
         if (ret < 0) {
             avcodec_free_context(&codec_ctx);
             avformat_close_input(&fmt_ctx);
@@ -327,19 +296,19 @@ private:
         }
         
         {
-            std::lock_guard<std::mutex> lock(g_stream_info_mutex);
-            std::string codec_name = codec->name;
-            if (!codec_name.empty()) {
-                codec_name[0] = std::toupper(codec_name[0]);
+            std::string format_info = codec->name;
+            if (!format_info.empty()) {
+				format_info[0] = std::toupper(format_info[0]);
             }
             
             int bitrate_kbps = codec_ctx->bit_rate / 1000;
-            if (bitrate_kbps > 0) {
-                g_pending_stream_info.format = codec_name + " " + std::to_string(bitrate_kbps) + "kbps";
-            } else {
-                g_pending_stream_info.format = codec_name;
-            }
-            g_pending_stream_info.pending = true;
+			if (bitrate_kbps > 0) {
+				format_info = format_info + " " + std::to_string(bitrate_kbps) + "kbps";
+			}
+
+			g_tui->set_stream_format(format_info);
+			g_tui->update_stream_kbps(bitrate_kbps);
+
         }
         
         SwrContext* swr_ctx = swr_alloc();
@@ -450,7 +419,7 @@ private:
             av_packet_unref(packet);
             
             size_t filled = audio_buffer_.readAvailable();
-            int percent = static_cast<int>((filled * 100) / PREBUFFER_TARGET);
+            int percent = static_cast<int>((filled * 100) / ByteRingbuffer::BUFFER_SIZE);
             if (percent > 100) percent = 100;
             g_pending_buffer_percent = percent;
         }
@@ -464,6 +433,10 @@ private:
             avformat_close_input(&fmt_ctx);
             return true;
         }
+
+
+		update_metadata_tui(fmt_ctx, audio_stream_idx);
+
         
         ret = ma_device_start(&device);
         if (ret != MA_SUCCESS) {
@@ -476,37 +449,26 @@ private:
             return false;
         }
         
-        int metadata_counter = 0;
-        uint64_t bytes_accumulated = 0;
-        auto last_calc = std::chrono::steady_clock::now();
-        
-        while (!stop_requested_) {
+		int metadata_counter = 0;
+		g_bytes_accumulated = 0;
+		g_last_kbps_calc = std::chrono::steady_clock::now();
+		auto last_buffer_update = std::chrono::steady_clock::now();
+		int old_buffer_percent = 0;
+        while (!stop_requested_)
+		{
             ret = av_read_frame(fmt_ctx, packet);
             if (ret < 0) break;
             
-            bytes_accumulated += packet->size;
+            g_bytes_accumulated += packet->size;
             
-            auto now = std::chrono::steady_clock::now();
-            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_calc).count();
-            if (elapsed >= 1000) {
-                int kbps = static_cast<int>((bytes_accumulated * 1000) / (elapsed * 1024));
-                g_current_kbps.store(kbps);
 
-                {
-                    std::lock_guard<std::mutex> lock(g_stream_info_mutex);
-                    g_pending_stream_info.kbps = kbps;
-                    g_pending_stream_info.pending = true;
-                }
-
-                bytes_accumulated = 0;
-                last_calc = now;
-            }
             
-            if (++metadata_counter % 5 == 0) {
-                update_metadata_tui(fmt_ctx, audio_stream_idx);
-            }
+//            if (++metadata_counter % 100 == 0) {
+//                update_metadata_tui(fmt_ctx, audio_stream_idx);
+//            }
             
-            if (packet->stream_index == audio_stream_idx) {
+            if (packet->stream_index == audio_stream_idx)
+			{
                 ret = avcodec_send_packet(codec_ctx, packet);
                 if (ret < 0) {
                     av_packet_unref(packet);
@@ -540,10 +502,29 @@ private:
                                 written += n;
                             }
                         }
-                    }
-                }
-            }
-            av_packet_unref(packet);
+					}
+				}
+
+				auto now_buffer = std::chrono::steady_clock::now();
+				auto elapsed_buffer = std::chrono::duration_cast<std::chrono::milliseconds>(now_buffer - last_buffer_update).count();
+				if (elapsed_buffer >= 1000)
+				{
+					update_metadata_tui(fmt_ctx, audio_stream_idx);
+
+
+					size_t filled = audio_buffer_.readAvailable();
+					int percent = static_cast<int>((filled * 100) / ByteRingbuffer::BUFFER_SIZE);
+					if (percent > 100) percent = 100;
+					if (old_buffer_percent != percent)
+					{
+						g_pending_buffer_percent = percent;
+						old_buffer_percent = percent;
+					}
+					last_buffer_update = now_buffer;
+				}
+
+			}
+			av_packet_unref(packet);
         }
 
         av_packet_free(&packet);
@@ -572,7 +553,26 @@ int main(int argc, char* argv[]) {
         stations_file = argv[1];
     }
     
-    std::vector<Station> stations = load_stations(stations_file);
+	std::vector<Station> stations;
+
+#ifndef NDEBUG
+	stations = {
+		{"TRANCE","https://content.audioaddict.com/prd/9/a/7/1/9/352c5fe756c019b0988545caf517fbbb11f.mp4?purpose=playback&audio_token=9afc90f92811fba385d6aedd2c559352&network=di&device=chrome_145_windows_10&ip=155.4.125.79&ip_type=4&country_code=SE&show_id=13896&exp=2026-03-01T21:54:14Z&auth=6135aef9dae8e7277bd739a38c3a96bcd37292fb"},
+		{"Bandit Rock", "https://fm02-ice.stream.khz.se/fm02_mp3?platform=web&aw_0_1st.playerid=mtgradio-web&aw_0_1st.skey=1770486477"},
+		{"STAR FM", "https://fm05-ice.stream.khz.se/fm05_mp3?platform=web&aw_0_1st.playerid=mtgradio-web&aw_0_1st.skey=1770487025"},
+		{"RIX FM", "https://fm01-ice.stream.khz.se/fm01_mp3?platform=web&aw_0_1st.playerid=mtgradio-web&aw_0_1st.skey=1770487082"},
+		{"Svenska Favoriter", "https://fm06-ice.stream.khz.se/fm06_mp3?platform=web&aw_0_1st.playerid=mtgradio-web&aw_0_1st.skey=1770487119"},
+		{"Rock Klassiker", "https://live-bauerse-fm.sharp-stream.com/rockklassiker_instream_se_aacp?direct=true&aw_0_1st.playerid=BMUK_inpage_html5&aw_0_1st.skey=1770662685"},
+		{"MIX Megapol", "https://live-bauerse-fm.sharp-stream.com/mixmegapol_instream_se_aacp?direct=true&aw_0_1st.playerid=BMUK_inpage_html5&aw_0_1st.skey=1770662914"},
+		{"Radio 45", "https://streaming.943.se/radio45"},
+		{"Svensk POP", "https://live-bauerse-fm.sharp-stream.com/svenskpop_se_aacp?direct=true&aw_0_1st.playerid=BMUK_inpage_html5&aw_0_1st.skey=1770663244"},
+		{"HYPR DemoScene", "https://hypr.website/hypr.mp3"}
+	};
+#else
+	stations = load_stations(stations_file);
+#endif
+
+
     if (stations.empty()) {
         std::cerr << "No stations loaded" << std::endl;
         return 1;
@@ -592,7 +592,8 @@ int main(int argc, char* argv[]) {
     
     g_tui->set_on_station_select([&player](const Station& station) {
         if (g_tui) {
-            g_tui->update_stream_genre("");
+            g_tui->set_song_title("","");
+			g_pending_buffer_percent = 0;
         }
         player.play(station.url, station.name);
     });
@@ -600,7 +601,7 @@ int main(int argc, char* argv[]) {
     g_tui->set_on_stop([&player]() {
         player.stop();
         if (g_tui) {
-            g_tui->update_stream_genre("");
+            g_tui->set_song_title("","");
         }
     });
     
@@ -628,77 +629,71 @@ int main(int argc, char* argv[]) {
     
     g_tui->draw_all();
     
-    while (g_running) {
+    while (g_running)
+	{
+		bool update_tui = false;
         int ch = g_tui->get_input();
         if (ch != ERR) {
             g_tui->handle_input(ch);
         }
         
         {
-            if (g_has_playing_state_update && g_tui) {
+            if (g_has_playing_state_update) {
+				g_tui->set_current_station(g_current_station_name);
                 g_tui->set_playing(g_pending_playing_state);
                 g_has_playing_state_update = false;
             }
             
             int buffer_percent = g_pending_buffer_percent.load();
             if (buffer_percent >= 0 && g_tui) {
-                g_tui->update_buffer(buffer_percent);
+                g_tui->update_cache_info(buffer_percent);
                 g_pending_buffer_percent = -1;
+				update_tui = true;
             }
             
-            std::string meta_title;
-            std::string meta_station;
-            bool has_meta_update = false;
             
-            {
-                std::lock_guard<std::mutex> lock(g_metadata_mutex);
-                if (g_pending_metadata.pending) {
-                    meta_title = g_pending_metadata.title;
-                    meta_station = g_pending_metadata.station;
-                    g_pending_metadata.pending = false;
-                    has_meta_update = true;
-                }
-            }
+            if (g_pending_metadata.pending)
+			{
+				{
+					std::lock_guard<std::mutex> lock(g_metadata_mutex);
+					g_tui->set_song_title(g_pending_metadata.title, g_pending_metadata.genre);
+					if (!g_pending_metadata.title.empty()) {
+						g_tui->add_to_history(g_pending_metadata.title, g_current_station_name);
+					}
+					g_pending_metadata.pending = false;
+				}
+				update_tui = true;
+			}
             
-            if (has_meta_update && g_tui) {
-                g_tui->update_metadata(meta_title, meta_station);
-                g_tui->add_to_history(meta_title, meta_station);
-            }
-            
-            std::string stream_format;
-            int stream_kbps = 0;
-            bool has_stream_update = false;
-            
-            {
-                std::lock_guard<std::mutex> lock(g_stream_info_mutex);
-                if (g_pending_stream_info.pending) {
-                    stream_format = g_pending_stream_info.format;
-                    stream_kbps = g_pending_stream_info.kbps;
-                    g_pending_stream_info.pending = false;
-                    has_stream_update = true;
-                }
-            }
-            
-            if (has_stream_update && g_tui) {
-                g_tui->update_stream_info(stream_format, stream_kbps);
-            }
-            
-            if (g_pending_genre_update && g_tui) {
-                g_tui->update_stream_genre(g_pending_genre);
-                g_pending_genre_update = false;
-            }
-			
+			auto now = std::chrono::steady_clock::now();
+			auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - g_last_kbps_calc).count();
+			if (elapsed >= 1000)
+			{
+				int kbps = static_cast<int>((g_bytes_accumulated * 1000) / (elapsed * 1024));
+				g_tui->update_stream_kbps(kbps);
+				g_bytes_accumulated = 0;
+				g_last_kbps_calc = now;
+				update_tui = true;
+			}
+
+		
 			if(g_fft_spectrum)
 			{
 				g_fft_spectrum->process_samples();
-	            if (g_fft_spectrum->has_new_data() && g_tui) {
+
+	            if (g_fft_spectrum->has_new_data()) {
 		            std::array<float, FFTSpectrum::NUM_BARS> spectrum_bars;
 			        bool updated = false;
 				    g_fft_spectrum->get_spectrum(spectrum_bars, updated);
 					if (updated) {
 						g_tui->update_spectrum(spectrum_bars);
+						update_tui = true;
 					}
 				}
+			}
+
+			if (update_tui) {
+				g_tui->draw_main();
 			}
        }
 

@@ -115,15 +115,19 @@ void RadioTUI::set_stations(const std::vector<Station>& stations) {
     draw_stations();
 }
 
-void RadioTUI::update_metadata(const std::string& title, const std::string& station) {
-    current_title_ = title;
-    current_station_ = station;
-    draw_main();
+void RadioTUI::set_current_station(const std::string& station) {
+	current_station_ = station;
 }
 
-void RadioTUI::update_buffer(int percent) {
+
+void RadioTUI::set_song_title(const std::string& title, const std::string& genre) {
+    current_title_ = title;
+	stream_genre_ = genre;
+}
+
+void RadioTUI::update_cache_info(int percent) {
     buffer_percent_ = percent;
-    draw_main();
+
 }
 
 void RadioTUI::set_playing(bool playing) {
@@ -136,20 +140,19 @@ void RadioTUI::set_volume(int percent) {
     draw_main();
 }
 
-void RadioTUI::update_stream_info(const std::string& format, int kbps) {
-    if (!format.empty()) {
-        stream_format_ = format;
-    }
+void RadioTUI::set_stream_format(const std::string& format)
+{
+	stream_format_ = format;
+}
+
+
+void RadioTUI::update_stream_kbps(int kbps) 
+{
     if (kbps > 0) {
         stream_kbps_ = kbps;
     }
-    draw_main();
 }
 
-void RadioTUI::update_stream_genre(const std::string& genre) {
-    stream_genre_ = genre;
-    draw_main();
-}
 
 void RadioTUI::update_track_metadata(const std::string& album, const std::string& year, const std::string& genre) {
     current_album_ = album;
@@ -163,12 +166,14 @@ void RadioTUI::update_spectrum(const std::array<float, FFTSpectrum::NUM_BARS>& b
     spectrum_bars_ = bars;
     spectrum_updated_ = true;
     // Only redraw if playing to avoid unnecessary updates
-    if (is_playing_) {
-        draw_main();
-    }
+//    if (is_playing_) {
+//        draw_main();
+//    }
 }
 
-void RadioTUI::add_to_history(const std::string& title, const std::string& station) {
+void RadioTUI::add_to_history(const std::string& title, const std::string& station)
+{
+//	if(title != current_title_)
     {
         std::lock_guard<std::mutex> lock(history_mutex_);
         SongHistoryEntry entry;
@@ -177,12 +182,11 @@ void RadioTUI::add_to_history(const std::string& title, const std::string& stati
         entry.played_at = std::chrono::system_clock::now();
         history_.push_back(entry);
 
-        // Keep only last 15
-        if (history_.size() > 15) {
+        // Keep only last 5
+        if (history_.size() > 5) {
             history_.erase(history_.begin());
         }
     }
-    draw_main();
 }
 
 void RadioTUI::draw_all() {
@@ -388,14 +392,9 @@ void RadioTUI::draw_main() {
             }
             y += 1;
         }
-
-        // Draw spectrum visualization on the right side
-        if (is_playing_ && spectrum_updated_) {
-            int max_x = getmaxx(main_win_);
-            // Position spectrum starting at y=7 (moved down from title)
-            draw_spectrum(7, max_x);
-        }
-    } else {
+    }
+	else
+	{
         if (!is_playing_) {
             mvwaddstr(main_win_, y, 3, "Select a station to start playing");
         } else {
@@ -403,6 +402,8 @@ void RadioTUI::draw_main() {
         }
         y += 2;
     }
+
+
 
     // Station name with stream info
     if (!current_station_.empty()) {
@@ -594,99 +595,108 @@ void RadioTUI::draw_main() {
         y += 2;
     }
 
+	// Draw spectrum visualization on the right side
+	if (is_playing_ && spectrum_updated_) {
+		int max_x = getmaxx(main_win_);
+		// Position spectrum starting at y=7 (moved down from title)
+		draw_spectrum(7, max_x);
+	}
+
+	y = 13;
+
     // Separator
     wattron(main_win_, COLOR_PAIR(color_border_));
     mvwhline(main_win_, y, 3, ACS_HLINE, max_x - 6);
     wattroff(main_win_, COLOR_PAIR(color_border_));
     y += 2;
 
-        // History section
-        std::string history_title = " HISTORY (Last 15) ";
-        mvwaddstr(main_win_, y, (max_x - history_title.length()) / 2, history_title.c_str());
-        y += 2;
+    // History section
+    std::string history_title = "HISTORY";
+    mvwaddstr(main_win_, y, (max_x - history_title.length()) / 2, history_title.c_str());
+    y += 2;
 
-        {
-            std::lock_guard<std::mutex> lock(history_mutex_);
-            if (history_.empty()) {
-                mvwaddstr(main_win_, y, 3, "No songs played yet.");
-            } else {
-                for (size_t i = 0; i < history_.size(); ++i) {
-                    const auto& entry = history_[history_.size() - 1 - i];
-                    int x = 3;
+    {
+        std::lock_guard<std::mutex> lock(history_mutex_);
+        if (history_.empty()) {
+            mvwaddstr(main_win_, y, 3, "No songs played yet.");
+        } else {
+            for (size_t i = 0; i < history_.size(); ++i) {
+                const auto& entry = history_[history_.size() - 1 - i];
+                int x = 3;
 
-                    // Clock [HH:MM] (cyan bold)
-                    if (has_colors()) {
-                        wattron(main_win_, COLOR_PAIR(color_history_num_) | A_BOLD);
-                    }
-                    std::string clock_str = "[" + format_time_clock(entry.played_at) + "] ";
-                    mvwaddstr(main_win_, y, x, clock_str.c_str());
-                    x += clock_str.length();
-                    if (has_colors()) {
-                        wattroff(main_win_, COLOR_PAIR(color_history_num_) | A_BOLD);
-                    }
-
-                    // Song title (yellow, quoted)
-                    if (has_colors()) {
-                        wattron(main_win_, COLOR_PAIR(color_title_) | A_BOLD);
-                    }
-                    mvwaddstr(main_win_, y, x, "\"");
-                    x += 1;
-
-                    std::string title = entry.title;
-                    int remaining = max_x - x - 25; // Reserve space for station, clock and ago time
-                    if (static_cast<int>(title.length()) > remaining) {
-                        title = title.substr(0, remaining - 3) + "...";
-                    }
-                    mvwaddstr(main_win_, y, x, title.c_str());
-                    x += title.length();
-
-                    mvwaddstr(main_win_, y, x, "\"");
-                    x += 1;
-                    if (has_colors()) {
-                        wattroff(main_win_, COLOR_PAIR(color_title_) | A_BOLD);
-                    }
-
-                    // " on " (dim white)
-                    if (!entry.station_name.empty()) {
-                        if (has_colors()) {
-                            wattron(main_win_, COLOR_PAIR(color_history_));
-                        }
-                        mvwaddstr(main_win_, y, x, " on ");
-                        x += 4;
-                        if (has_colors()) {
-                            wattroff(main_win_, COLOR_PAIR(color_history_));
-                        }
-
-                        // Station name (green)
-                        if (has_colors()) {
-                            wattron(main_win_, COLOR_PAIR(color_history_station_));
-                        }
-                        std::string station = entry.station_name;
-                        int station_space = max_x - x - 15; // Reserve space for ago time
-                        if (static_cast<int>(station.length()) > station_space) {
-                            station = station.substr(0, station_space - 3) + "...";
-                        }
-                        mvwaddstr(main_win_, y, x, station.c_str());
-                        x += station.length();
-                        if (has_colors()) {
-                            wattroff(main_win_, COLOR_PAIR(color_history_station_));
-                        }
-                    }
-
-                    // Time ago (blue)
-                    if (has_colors()) {
-                        wattron(main_win_, COLOR_PAIR(color_history_time_));
-                    }
-                    std::string time_str = " (" + format_time_ago(entry.played_at) + ")";
-                    mvwaddstr(main_win_, y, x, time_str.c_str());
-                    if (has_colors()) {
-                        wattroff(main_win_, COLOR_PAIR(color_history_time_));
-                    }
-
-                    y++;
+                // Clock [HH:MM] (cyan bold)
+                if (has_colors()) {
+                    wattron(main_win_, COLOR_PAIR(color_history_num_) | A_BOLD);
                 }
+                std::string clock_str = "[" + format_time_clock(entry.played_at) + "] ";
+                mvwaddstr(main_win_, y, x, clock_str.c_str());
+                x += clock_str.length();
+                if (has_colors()) {
+                    wattroff(main_win_, COLOR_PAIR(color_history_num_) | A_BOLD);
+                }
+
+                // Song title (yellow, quoted)
+                if (has_colors()) {
+                    wattron(main_win_, COLOR_PAIR(color_title_) | A_BOLD);
+                }
+                mvwaddstr(main_win_, y, x, "\"");
+                x += 1;
+
+                std::string title = entry.title;
+                int remaining = max_x - x - 25; // Reserve space for station, clock and ago time
+                if (static_cast<int>(title.length()) > remaining) {
+                    title = title.substr(0, remaining - 3) + "...";
+                }
+                mvwaddstr(main_win_, y, x, title.c_str());
+                x += title.length();
+
+                mvwaddstr(main_win_, y, x, "\"");
+                x += 1;
+                if (has_colors()) {
+                    wattroff(main_win_, COLOR_PAIR(color_title_) | A_BOLD);
+                }
+
+                // " on " (dim white)
+                if (!entry.station_name.empty()) {
+                    if (has_colors()) {
+                        wattron(main_win_, COLOR_PAIR(color_history_));
+                    }
+                    mvwaddstr(main_win_, y, x, " on ");
+                    x += 4;
+                    if (has_colors()) {
+                        wattroff(main_win_, COLOR_PAIR(color_history_));
+                    }
+
+                    // Station name (green)
+                    if (has_colors()) {
+                        wattron(main_win_, COLOR_PAIR(color_history_station_));
+                    }
+                    std::string station = entry.station_name;
+                    int station_space = max_x - x - 15; // Reserve space for ago time
+                    if (static_cast<int>(station.length()) > station_space) {
+                        station = station.substr(0, station_space - 3) + "...";
+                    }
+                    mvwaddstr(main_win_, y, x, station.c_str());
+                    x += station.length();
+                    if (has_colors()) {
+                        wattroff(main_win_, COLOR_PAIR(color_history_station_));
+                    }
+                }
+
+                // Time ago (blue)
+                if (has_colors()) {
+                    wattron(main_win_, COLOR_PAIR(color_history_time_));
+                }
+                std::string time_str = " (" + format_time_ago(entry.played_at) + ")";
+                mvwaddstr(main_win_, y, x, time_str.c_str());
+                if (has_colors()) {
+                    wattroff(main_win_, COLOR_PAIR(color_history_time_));
+                }
+
+                y++;
             }
         }
+    }
 
     wrefresh(main_win_);
 }

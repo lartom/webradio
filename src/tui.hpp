@@ -21,6 +21,14 @@ struct SongHistoryEntry {
     std::chrono::system_clock::time_point played_at;
 };
 
+struct StreamMetadata
+{
+	std::string title;
+	std::string genre;
+	bool pending = false;
+};
+
+
 class RadioTUI {
 private:
     WINDOW* header_win_ = nullptr;
@@ -84,12 +92,14 @@ public:
     void destroy_windows();
     
     void set_stations(const std::vector<Station>& stations);
-    void update_metadata(const std::string& title, const std::string& station);
-    void update_buffer(int percent);
+	void set_current_station(const std::string& station);
+
+    void set_song_title(const std::string& title, const std::string& genre);
+    void update_cache_info(int percent);
     void set_playing(bool playing);
     void set_volume(int percent);
-    void update_stream_info(const std::string& format, int kbps);
-    void update_stream_genre(const std::string& genre);
+	void set_stream_format(const std::string& format);
+    void update_stream_kbps(int kbps);
     void add_to_history(const std::string& title, const std::string& station);
     void update_track_metadata(const std::string& album, const std::string& year, const std::string& genre);
     void update_spectrum(const std::array<float, FFTSpectrum::NUM_BARS>& bars);

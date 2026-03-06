@@ -50,7 +50,6 @@ private:
         size_t available() const;
     };
     
-	std::mutex sample_buffer_mutex;
     SampleBuffer sample_buffer_;
     SpectrumData spectrum_data_;
     

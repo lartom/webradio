@@ -4,6 +4,12 @@
 #include <cmath>
 #include <cstring>
 
+#ifdef _MSC_VER
+	#include <intrin.h>
+#else
+	#include <emmintrin.h>  // SSE2
+#endif
+
 // Separate attack (rising) and decay (falling) factors like cava
 // Attack: how fast bars rise (lower = faster rise)
 // Decay: how fast bars fall (higher = slower fall)
@@ -13,6 +19,88 @@ static constexpr float DECAY_FACTOR = 0.85f;    // Slow fall
 // Minimum and maximum frequency for visualization
 static constexpr float MIN_FREQ = 30.0f;   // Hz - lower for better bass response
 static constexpr float MAX_FREQ = 16000.0f; // Hz
+
+#ifdef WEBRADIO_USE_SSE2
+void FFTSpectrum::SampleBuffer::push_mono(const int16_t* stereo, size_t frames) {
+	// SSE2 optimized version - process 4 frames at a time
+	const __m128 scale = _mm_set1_ps(1.0f / 32768.0f);
+	const __m128 half = _mm_set1_ps(0.5f);
+
+	size_t i = 0;
+
+	// Process 4 frames at a time with SSE2
+	for (; i + 3 < frames; i += 4) {
+		// Load 8 int16 samples (4 stereo frames: L0 R0 L1 R1 L2 R2 L3 R3)
+		__m128i samples_i16 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(&stereo[i * 2]));
+
+		// Unpack lower 4 int16 to int32 (L0 R0 L1 R1)
+		__m128i lower_i32 = _mm_unpacklo_epi16(samples_i16, _mm_srai_epi16(samples_i16, 15));
+		// Unpack upper 4 int16 to int32 (L2 R2 L3 R3)
+		__m128i upper_i32 = _mm_unpackhi_epi16(samples_i16, _mm_srai_epi16(samples_i16, 15));
+
+		// Convert to float
+		__m128 lower_f = _mm_cvtepi32_ps(lower_i32);  // L0 R0 L1 R1
+		__m128 upper_f = _mm_cvtepi32_ps(upper_i32);  // L2 R2 L3 R3
+
+		// Scale to -1.0 to 1.0 range
+		lower_f = _mm_mul_ps(lower_f, scale);
+		upper_f = _mm_mul_ps(upper_f, scale);
+
+		// Shuffle to separate left and right channels
+		// lower: L0 R0 L1 R1 -> L0 L1 R0 R1
+		// upper: L2 R2 L3 R3 -> L2 L3 R2 R3
+		__m128 lower_shuffled = _mm_shuffle_ps(lower_f, lower_f, _MM_SHUFFLE(3, 1, 2, 0));
+		__m128 upper_shuffled = _mm_shuffle_ps(upper_f, upper_f, _MM_SHUFFLE(3, 1, 2, 0));
+
+		// Combine to get all left and all right channels
+		// left_channels: L0 L1 L2 L3
+		__m128 left_channels = _mm_shuffle_ps(lower_shuffled, upper_shuffled, _MM_SHUFFLE(2, 0, 2, 0));
+		// right_channels: R0 R1 R2 R3
+		__m128 right_channels = _mm_shuffle_ps(lower_shuffled, upper_shuffled, _MM_SHUFFLE(3, 1, 3, 1));
+
+		// Average left and right to get mono
+		__m128 sum = _mm_add_ps(left_channels, right_channels);
+		__m128 mono = _mm_mul_ps(sum, half);
+
+		// Store mono samples to ring buffer
+		alignas(16) float mono_samples[4];
+		_mm_store_ps(mono_samples, mono);
+
+		for (int j = 0; j < 4; ++j) {
+			size_t pos = write_pos.load(std::memory_order_relaxed);
+			samples[pos] = mono_samples[j];
+
+			size_t next_pos = (pos + 1) % SIZE;
+			write_pos.store(next_pos, std::memory_order_release);
+
+			// If buffer is full, advance read position (overwrite oldest)
+			if (next_pos == read_pos.load(std::memory_order_acquire)) {
+				read_pos.store((next_pos + 1) % SIZE, std::memory_order_relaxed);
+			}
+		}
+	}
+
+	// Process remaining frames with scalar code
+	for (; i < frames; ++i) {
+		// Convert stereo s16 to mono float (-1.0 to 1.0)
+		float left = stereo[i * 2] / 32768.0f;
+		float right = stereo[i * 2 + 1] / 32768.0f;
+		float mono = (left + right) * 0.5f;
+
+		size_t pos = write_pos.load(std::memory_order_relaxed);
+		samples[pos] = mono;
+
+		size_t next_pos = (pos + 1) % SIZE;
+		write_pos.store(next_pos, std::memory_order_release);
+
+		// If buffer is full, advance read position (overwrite oldest)
+		if (next_pos == read_pos.load(std::memory_order_acquire)) {
+			read_pos.store((next_pos + 1) % SIZE, std::memory_order_relaxed);
+		}
+	}
+}
+
+#else
 
 void FFTSpectrum::SampleBuffer::push_mono(const int16_t* stereo, size_t frames) {
     for (size_t i = 0; i < frames; ++i) {
@@ -33,6 +121,7 @@ void FFTSpectrum::SampleBuffer::push_mono(const int16_t* stereo, size_t frames) 
         }
     }
 }
+#endif
 
 size_t FFTSpectrum::SampleBuffer::available() const {
     size_t write = write_pos.load(std::memory_order_acquire);
@@ -244,7 +333,7 @@ void FFTSpectrum::update_spectrum() {
 
 void FFTSpectrum::push_samples(const int16_t* stereo_samples, size_t frame_count)
 {
-	std::lock_guard<std::mutex> lock(sample_buffer_mutex);
+	//std::lock_guard<std::mutex> lock(sample_buffer_mutex);
     // Push samples to ring buffer
     sample_buffer_.push_mono(stereo_samples, frame_count);
 } 
@@ -254,14 +343,16 @@ void FFTSpectrum::process_samples()
    
     // Process FFT when we have enough samples
     static auto last_update = std::chrono::steady_clock::now();
+
+
     auto now = std::chrono::steady_clock::now();
     auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_update).count();
     
     if (elapsed >= UPDATE_INTERVAL_MS && sample_buffer_.available() >= FFT_SIZE) {
 
-		sample_buffer_mutex.lock();
+		//sample_buffer_mutex.lock();
 		sample_buffer_.read_block(fft_input_.data(), FFT_SIZE);
-		sample_buffer_mutex.unlock();
+		//sample_buffer_mutex.unlock();
 
 		// Read block of samples
         compute_fft();
