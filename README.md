@@ -43,6 +43,15 @@ cmake -B build -S . -DCMAKE_BUILD_TYPE=Debug
 cmake --build build/debug
 ```
 
+### SIMD Build Flags (SSE2)
+
+On x86/x86_64 CPUs, CMake enables SSE2 automatically for you:
+
+- Compiler flag: `-msse2`
+- Preprocessor define: `WEBRADIO_USE_SSE2=1`
+
+No extra manual flag is required in the build command.
+
 
 
 ### Clean Rebuild
