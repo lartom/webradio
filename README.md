@@ -33,12 +33,14 @@ A terminal-based internet radio player built with FFmpeg and ncurses. Stream liv
 
 ```bash
 # Release build (optimized, no debug output)
-cmake -B build -S . -DCMAKE_BUILD_TYPE=Release
-cmake --build build
+cmake -B build -S . -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$HOME/.local"
+cmake --build build/release
+# Or to install in {PREFIX}/bin
+cmake --build build/release --target install
 
 # Debug build (with status output)
 cmake -B build -S . -DCMAKE_BUILD_TYPE=Debug
-cmake --build build
+cmake --build build/debug
 ```
 
 
