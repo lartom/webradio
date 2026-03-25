@@ -119,6 +119,10 @@ void data_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uin
         bytesRead += chunk;
     }
 
+    if (bytesRead < bytesToWrite) {
+        std::memset(output + bytesRead, 0, bytesToWrite - bytesRead);
+    }
+
 	if (bytesRead > 0) {
 		float volume = g_volume.load();
 		if (volume <= 0.99f) {
