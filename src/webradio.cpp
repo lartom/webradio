@@ -97,7 +97,7 @@ void data_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uin
 
 	if (bytesRead > 0) {
 		float volume = g_volume.load();
-		if (volume < 0.99f) {
+		if (volume <= 0.99f) {
 			int16_t* samples = reinterpret_cast<int16_t*>(output);
 			size_t sampleCount = bytesRead / 2;
 
@@ -418,7 +418,7 @@ private:
             }
             av_packet_unref(packet);
             
-            size_t filled = audio_buffer_.readAvailable();
+            size_t filled = audio_buffer_.read_available();
             int percent = static_cast<int>((filled * 100) / ByteRingbuffer::BUFFER_SIZE);
             if (percent > 100) percent = 100;
             g_pending_buffer_percent = percent;
@@ -449,7 +449,6 @@ private:
             return false;
         }
         
-		int metadata_counter = 0;
 		g_bytes_accumulated = 0;
 		g_last_kbps_calc = std::chrono::steady_clock::now();
 		auto last_buffer_update = std::chrono::steady_clock::now();
@@ -460,12 +459,6 @@ private:
             if (ret < 0) break;
             
             g_bytes_accumulated += packet->size;
-            
-
-            
-//            if (++metadata_counter % 100 == 0) {
-//                update_metadata_tui(fmt_ctx, audio_stream_idx);
-//            }
             
             if (packet->stream_index == audio_stream_idx)
 			{
@@ -512,7 +505,7 @@ private:
 					update_metadata_tui(fmt_ctx, audio_stream_idx);
 
 
-					size_t filled = audio_buffer_.readAvailable();
+					size_t filled = audio_buffer_.read_available();
 					int percent = static_cast<int>((filled * 100) / ByteRingbuffer::BUFFER_SIZE);
 					if (percent > 100) percent = 100;
 					if (old_buffer_percent != percent)

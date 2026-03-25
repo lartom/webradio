@@ -56,20 +56,6 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64|x86|i[3-6]86)$")
     endif()
 endif()
 
-# Enable SSE2 on x86-family targets
-if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64|x86|i[3-6]86)$")
-    target_compile_definitions(webradio PRIVATE WEBRADIO_USE_SSE2=1)
-
-    if(MSVC)
-        # x64 MSVC uses SSE2 by default; force only for 32-bit
-        if(CMAKE_SIZEOF_VOID_P EQUAL 4)
-            target_compile_options(webradio PRIVATE /arch:SSE2)
-        endif()
-    else()
-        target_compile_options(webradio PRIVATE -msse2)
-    endif()
-endif()
-
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     target_compile_definitions(webradio PRIVATE DEBUG_BUILD AUDIO_DEBUG=1)
 else()

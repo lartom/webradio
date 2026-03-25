@@ -30,7 +30,6 @@ public:
         if (available == 0) return 0;
         
         size_t to_write = std::min(len, available);
-        size_t written = 0;
         
         // Write in two parts if wrapping around
         size_t first_part = std::min(to_write, BUFFER_SIZE - (head & BUFFER_MASK));
@@ -85,13 +84,13 @@ public:
     }
 
     // Check max contiguous space available for writing (before wrap-around)
-    size_t write_availableContiguous() const {
+    size_t write_available_contiguous() const {
         size_t head = head_.load(std::memory_order_acquire);
         return BUFFER_SIZE - (head & BUFFER_MASK);
     }
 
     // Check max contiguous data available for reading (before wrap-around)
-    size_t read_availableContiguous() const {
+    size_t read_available_contiguous() const {
         size_t tail = tail_.load(std::memory_order_acquire);
         return BUFFER_SIZE - (tail & BUFFER_MASK);
     }

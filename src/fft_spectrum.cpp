@@ -305,8 +305,6 @@ void FFTSpectrum::update_spectrum() {
 
         normalized = std::max(0.0f, std::min(1.0f, normalized));
 
-        normalized = std::max(0.0f, std::min(1.0f, normalized));
-
         // Apply separate attack/decay with gravity effect like cava
         float current = smoothed_magnitudes_[bar];
         float diff = normalized - current;
