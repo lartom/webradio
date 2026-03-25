@@ -165,10 +165,6 @@ void RadioTUI::update_track_metadata(const std::string& album, const std::string
 void RadioTUI::update_spectrum(const std::array<float, FFTSpectrum::NUM_BARS>& bars) {
     spectrum_bars_ = bars;
     spectrum_updated_ = true;
-    // Only redraw if playing to avoid unnecessary updates
-//    if (is_playing_) {
-//        draw_main();
-//    }
 }
 
 void RadioTUI::add_to_history(const std::string& title, const std::string& station)
@@ -288,9 +284,6 @@ void RadioTUI::draw_stations() {
             wattroff(station_win_, COLOR_PAIR(color_title_) | A_BOLD);
         }
     }
-
-
-
     wrefresh(station_win_);
 }
 
@@ -598,8 +591,8 @@ void RadioTUI::draw_main() {
 	// Draw spectrum visualization on the right side
 	if (is_playing_ && spectrum_updated_) {
 		int max_x = getmaxx(main_win_);
-		// Position spectrum starting at y=7 (moved down from title)
 		draw_spectrum(7, max_x);
+		spectrum_updated_ = false;
 	}
 
 	y = 13;
@@ -698,6 +691,16 @@ void RadioTUI::draw_main() {
         }
     }
 
+    wrefresh(main_win_);
+}
+
+void RadioTUI::draw_spectrum_overlay() {
+    if (!main_win_) return;
+    if (!is_playing_ || !spectrum_updated_) return;
+
+    int max_x = getmaxx(main_win_);
+    draw_spectrum(7, max_x);
+    spectrum_updated_ = false;
     wrefresh(main_win_);
 }
 

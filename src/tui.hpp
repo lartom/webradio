@@ -110,6 +110,7 @@ public:
     void draw_main();
     void draw_controls();
     void draw_spectrum(int y, int max_x);
+    void draw_spectrum_overlay();
     void refresh_all();
     
     int get_input();

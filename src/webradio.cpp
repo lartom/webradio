@@ -722,9 +722,10 @@ int main(int argc, char* argv[]) {
     
     g_tui->draw_all();
     
-    while (g_running)
+	while (g_running)
 	{
 		bool update_tui = false;
+		bool only_spectrum_update = false;
         int ch = g_tui->get_input();
         if (ch != ERR) {
             g_tui->handle_input(ch);
@@ -780,13 +781,20 @@ int main(int argc, char* argv[]) {
 				    g_fft_spectrum->get_spectrum(spectrum_bars, updated);
 					if (updated) {
 						g_tui->update_spectrum(spectrum_bars);
+						if (!update_tui) {
+							only_spectrum_update = true;
+						}
 						update_tui = true;
 					}
 				}
 			}
 
 			if (update_tui) {
-				g_tui->draw_main();
+				if (only_spectrum_update) {
+					g_tui->draw_spectrum_overlay();
+				} else {
+					g_tui->draw_main();
+				}
 			}
        }
 
