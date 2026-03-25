@@ -101,7 +101,19 @@ void data_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uin
     size_t bytesToWrite = static_cast<size_t>(frameCount) * bytesPerFrame;
    
 	// copy PCM data to audio playback buffer
-    size_t bytesRead = buffer->read(output, bytesToWrite);
+    size_t bytesRead = 0;
+    while (bytesRead < bytesToWrite) {
+        const uint8_t* src = nullptr;
+        size_t available = buffer->reserve_read_contiguous(src);
+        if (available == 0 || src == nullptr) {
+            break;
+        }
+
+        size_t chunk = std::min(available, bytesToWrite - bytesRead);
+        std::memcpy(output + bytesRead, src, chunk);
+        buffer->consume(chunk);
+        bytesRead += chunk;
+    }
 
 	if (bytesRead > 0) {
 		float volume = g_volume.load();
@@ -359,44 +371,56 @@ private:
 
         }
         
-        SwrContext* swr_ctx = swr_alloc();
-        if (!swr_ctx) {
-            avcodec_free_context(&codec_ctx);
-            avformat_close_input(&fmt_ctx);
-            return false;
-        }
-        
-        AVChannelLayout out_ch_layout;
-        av_channel_layout_default(&out_ch_layout, 2);
-        
-        ret = swr_alloc_set_opts2(&swr_ctx,
-            &out_ch_layout,
-            AV_SAMPLE_FMT_S16,
-            44100,
-            &codec_ctx->ch_layout,
-            codec_ctx->sample_fmt,
-            codec_ctx->sample_rate,
-            0, nullptr);
-        
-        if (ret < 0) {
-            swr_free(&swr_ctx);
-            avcodec_free_context(&codec_ctx);
-            avformat_close_input(&fmt_ctx);
-            return false;
-        }
-        
-        ret = swr_init(swr_ctx);
-        if (ret < 0) {
-            swr_free(&swr_ctx);
-            avcodec_free_context(&codec_ctx);
-            avformat_close_input(&fmt_ctx);
-            return false;
+        constexpr int OUTPUT_SAMPLE_RATE = 44100;
+        constexpr int OUTPUT_CHANNELS = 2;
+        constexpr size_t OUTPUT_BYTES_PER_FRAME = 4;
+
+        bool passthrough_pcm =
+            codec_ctx->sample_fmt == AV_SAMPLE_FMT_S16 &&
+            codec_ctx->sample_rate == OUTPUT_SAMPLE_RATE &&
+            codec_ctx->ch_layout.nb_channels == OUTPUT_CHANNELS;
+
+        SwrContext* swr_ctx = nullptr;
+        if (!passthrough_pcm) {
+            swr_ctx = swr_alloc();
+            if (!swr_ctx) {
+                avcodec_free_context(&codec_ctx);
+                avformat_close_input(&fmt_ctx);
+                return false;
+            }
+
+            AVChannelLayout out_ch_layout;
+            av_channel_layout_default(&out_ch_layout, OUTPUT_CHANNELS);
+
+            ret = swr_alloc_set_opts2(&swr_ctx,
+                &out_ch_layout,
+                AV_SAMPLE_FMT_S16,
+                OUTPUT_SAMPLE_RATE,
+                &codec_ctx->ch_layout,
+                codec_ctx->sample_fmt,
+                codec_ctx->sample_rate,
+                0, nullptr);
+
+            if (ret < 0) {
+                swr_free(&swr_ctx);
+                avcodec_free_context(&codec_ctx);
+                avformat_close_input(&fmt_ctx);
+                return false;
+            }
+
+            ret = swr_init(swr_ctx);
+            if (ret < 0) {
+                swr_free(&swr_ctx);
+                avcodec_free_context(&codec_ctx);
+                avformat_close_input(&fmt_ctx);
+                return false;
+            }
         }
         
         ma_device_config deviceConfig = ma_device_config_init(ma_device_type_playback);
         deviceConfig.playback.format = ma_format_s16;
-        deviceConfig.playback.channels = 2;
-        deviceConfig.sampleRate = 44100;
+        deviceConfig.playback.channels = OUTPUT_CHANNELS;
+        deviceConfig.sampleRate = OUTPUT_SAMPLE_RATE;
         deviceConfig.dataCallback = data_callback;
         deviceConfig.pUserData = &audio_buffer_;
         
@@ -422,6 +446,54 @@ private:
         
         audio_buffer_.consumer_clear();
         constexpr size_t PREBUFFER_TARGET = 65536;
+
+        auto write_to_audio_buffer = [&](const uint8_t* src, size_t data_size) {
+            size_t written = 0;
+            while (written < data_size && !stop_requested_) {
+                uint8_t* dst = nullptr;
+                size_t available = audio_buffer_.reserve_write_contiguous(dst);
+                if (available == 0 || dst == nullptr) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                    continue;
+                }
+
+                size_t chunk = std::min(available, data_size - written);
+                std::memcpy(dst, src + written, chunk);
+                audio_buffer_.produce(chunk);
+                written += chunk;
+            }
+        };
+
+        auto convert_frame_to_audio_buffer = [&](AVFrame* decoded_frame) {
+            const uint8_t* const* input = const_cast<const uint8_t* const*>(decoded_frame->extended_data);
+            int input_samples = decoded_frame->nb_samples;
+            bool input_sent = false;
+
+            while (!stop_requested_) {
+                uint8_t* dst = nullptr;
+                size_t available = audio_buffer_.reserve_write_contiguous(dst);
+                if (available < OUTPUT_BYTES_PER_FRAME || dst == nullptr) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                    continue;
+                }
+
+                int max_samples = static_cast<int>(available / OUTPUT_BYTES_PER_FRAME);
+                int converted_samples = swr_convert(
+                    swr_ctx,
+                    &dst,
+                    max_samples,
+                    input_sent ? nullptr : input,
+                    input_sent ? 0 : input_samples);
+
+                if (converted_samples <= 0) {
+                    return;
+                }
+
+                size_t produced_bytes = static_cast<size_t>(converted_samples) * OUTPUT_BYTES_PER_FRAME;
+                audio_buffer_.produce(produced_bytes);
+                input_sent = true;
+            }
+        };
         
         while (!stop_requested_ && audio_buffer_.read_available() < PREBUFFER_TARGET) {
             ret = av_read_frame(fmt_ctx, packet);
@@ -439,28 +511,18 @@ private:
                     if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) break;
                     if (ret < 0) break;
                     
-                    int out_samples = swr_get_out_samples(swr_ctx, frame->nb_samples);
-                    if (out_samples <= 0) continue;
-                    
-                    alignas(16) uint8_t temp_buffer[32768];
-                    int max_samples = static_cast<int>(sizeof(temp_buffer) / 4);
-                    
-                    uint8_t* out_buf = temp_buffer;
-                    int converted_samples = swr_convert(swr_ctx,
-                        &out_buf, max_samples,
-                        (const uint8_t**)frame->data, frame->nb_samples);
-                    
-                    if (converted_samples > 0) {
-                        size_t data_size = static_cast<size_t>(converted_samples) * 4;
-                        size_t written = 0;
-                        while (written < data_size && !stop_requested_) {
-                            size_t n = audio_buffer_.write(temp_buffer + written, data_size - written);
-                            if (n == 0) {
-                                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                            } else {
-                                written += n;
-                            }
+                    if (passthrough_pcm) {
+                        int data_size = av_samples_get_buffer_size(
+                            nullptr,
+                            codec_ctx->ch_layout.nb_channels,
+                            frame->nb_samples,
+                            codec_ctx->sample_fmt,
+                            1);
+                        if (data_size > 0 && frame->data[0] != nullptr) {
+                            write_to_audio_buffer(frame->data[0], static_cast<size_t>(data_size));
                         }
+                    } else {
+                        convert_frame_to_audio_buffer(frame);
                     }
                 }
             }
@@ -521,29 +583,19 @@ private:
                     if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) break;
                     if (ret < 0) break;
                     
-                    int out_samples = swr_get_out_samples(swr_ctx, frame->nb_samples);
-                    if (out_samples <= 0) continue;
-                    
-                    alignas(16) uint8_t temp_buffer[32768];
-                    int max_samples = static_cast<int>(sizeof(temp_buffer) / 4);
-                    
-                    uint8_t* out_buf = temp_buffer;
-                    int converted_samples = swr_convert(swr_ctx,
-                        &out_buf, max_samples,
-                        (const uint8_t**)frame->data, frame->nb_samples);
-                    
-                    if (converted_samples > 0) {
-                        size_t data_size = static_cast<size_t>(converted_samples) * 4;
-                        size_t written = 0;
-                        while (written < data_size && !stop_requested_) {
-                            size_t n = audio_buffer_.write(temp_buffer + written, data_size - written);
-                            if (n == 0) {
-                                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                            } else {
-                                written += n;
-                            }
+                    if (passthrough_pcm) {
+                        int data_size = av_samples_get_buffer_size(
+                            nullptr,
+                            codec_ctx->ch_layout.nb_channels,
+                            frame->nb_samples,
+                            codec_ctx->sample_fmt,
+                            1);
+                        if (data_size > 0 && frame->data[0] != nullptr) {
+                            write_to_audio_buffer(frame->data[0], static_cast<size_t>(data_size));
                         }
-					}
+                    } else {
+                        convert_frame_to_audio_buffer(frame);
+                    }
 				}
 
 				auto now_buffer = std::chrono::steady_clock::now();

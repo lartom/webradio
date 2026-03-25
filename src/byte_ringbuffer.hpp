@@ -45,6 +45,31 @@ public:
         return to_write;
     }
 
+    // Reserve a contiguous writable span for producer.
+    // Call produce() after writing bytes to returned pointer.
+    size_t reserve_write_contiguous(uint8_t*& dst) {
+        size_t head = head_.load(std::memory_order_relaxed);
+        size_t tail = tail_.load(std::memory_order_acquire);
+
+        size_t available = write_available(head, tail);
+        if (available == 0) {
+            dst = nullptr;
+            return 0;
+        }
+
+        size_t start = head & BUFFER_MASK;
+        size_t contiguous = std::min(available, BUFFER_SIZE - start);
+        dst = buffer_ + start;
+        return contiguous;
+    }
+
+    // Commit produced bytes after reserve_write_contiguous().
+    void produce(size_t len) {
+        if (len == 0) return;
+        size_t head = head_.load(std::memory_order_relaxed);
+        head_.store(head + len, std::memory_order_release);
+    }
+
     // Read data from buffer. Returns bytes actually read (may be less than requested if buffer empty)
     size_t read(uint8_t* dst, size_t len) {
         size_t tail = tail_.load(std::memory_order_relaxed);
@@ -67,6 +92,31 @@ public:
         tail_.store(tail + to_read, std::memory_order_release);
         
         return to_read;
+    }
+
+    // Reserve a contiguous readable span for consumer.
+    // Call consume() after reading bytes from returned pointer.
+    size_t reserve_read_contiguous(const uint8_t*& src) const {
+        size_t tail = tail_.load(std::memory_order_relaxed);
+        size_t head = head_.load(std::memory_order_acquire);
+
+        size_t available = read_available(head, tail);
+        if (available == 0) {
+            src = nullptr;
+            return 0;
+        }
+
+        size_t start = tail & BUFFER_MASK;
+        size_t contiguous = std::min(available, BUFFER_SIZE - start);
+        src = buffer_ + start;
+        return contiguous;
+    }
+
+    // Commit consumed bytes after reserve_read_contiguous().
+    void consume(size_t len) {
+        if (len == 0) return;
+        size_t tail = tail_.load(std::memory_order_relaxed);
+        tail_.store(tail + len, std::memory_order_release);
     }
 
     // Check available bytes for reading
