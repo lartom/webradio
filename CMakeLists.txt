@@ -25,6 +25,10 @@ pkg_check_modules(NCURSESW REQUIRED ncursesw)
 
 add_executable(webradio src/webradio.cpp src/tui.cpp src/fft_spectrum.cpp)
 
+target_compile_definitions(webradio PRIVATE
+    WEBRADIO_VERSION="${PROJECT_VERSION}"
+)
+
 target_include_directories(webradio PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/src

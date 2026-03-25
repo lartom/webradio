@@ -5,6 +5,10 @@
 #include <ctime>
 #include <algorithm>
 
+#ifndef WEBRADIO_VERSION
+#define WEBRADIO_VERSION "0.0.0"
+#endif
+
 RadioTUI::RadioTUI() {}
 
 RadioTUI::~RadioTUI() {
@@ -206,7 +210,7 @@ void RadioTUI::draw_header() {
         wbkgd(header_win_, COLOR_PAIR(color_header_) | ' ');
     }
 
-    std::string title = "Web Radio Player";
+    std::string title = std::string("Web Radio Player v") + WEBRADIO_VERSION;
     std::string quit_hint = "[Quit: q]";
 
     wattron(header_win_, A_BOLD);

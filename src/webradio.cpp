@@ -59,6 +59,10 @@ extern "C" {
 
 using json = nlohmann::json;
 
+#ifndef WEBRADIO_VERSION
+#define WEBRADIO_VERSION "0.0.0"
+#endif
+
 std::atomic<bool> g_running{true};
 std::atomic<bool> g_playing{false};
 std::atomic<float> g_volume{1.0f};
@@ -637,6 +641,14 @@ int main(int argc, char* argv[]) {
 #ifndef FFMPEG_DEBUG_LOGGING
     av_log_set_callback(suppress_ffmpeg_logging);
 #endif
+
+    if (argc > 1) {
+        std::string arg = argv[1];
+        if (arg == "--version" || arg == "-v") {
+            std::cout << WEBRADIO_VERSION << std::endl;
+            return 0;
+        }
+    }
 
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);
