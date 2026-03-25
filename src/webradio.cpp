@@ -10,9 +10,17 @@
 #include <chrono>
 #include <memory>
 #include <functional>
+#include <filesystem>
+#include <array>
+#include <cstdlib>
 
 #include <nlohmann/json.hpp>
 #include <fstream>
+
+#ifdef __linux__
+#include <unistd.h>
+#include <limits.h>
+#endif
 
 #include "byte_ringbuffer.hpp"
 #include "tui.hpp"
@@ -152,6 +160,46 @@ std::vector<Station> load_stations(const std::string& filename) {
     }
     
     return stations;
+}
+
+std::string get_executable_directory() {
+#ifdef __linux__
+    std::array<char, PATH_MAX> exe_path{};
+    ssize_t len = readlink("/proc/self/exe", exe_path.data(), exe_path.size() - 1);
+    if (len <= 0) {
+        return {};
+    }
+
+    exe_path[static_cast<size_t>(len)] = '\0';
+    return std::filesystem::path(exe_path.data()).parent_path().string();
+#else
+    return {};
+#endif
+}
+
+std::string resolve_default_stations_file() {
+    std::vector<std::filesystem::path> candidates;
+    candidates.emplace_back(std::filesystem::current_path() / "stations.json");
+
+    std::string exe_dir = get_executable_directory();
+    if (!exe_dir.empty()) {
+        candidates.emplace_back(std::filesystem::path(exe_dir) / "stations.json");
+    }
+
+    if (const char* xdg_config = std::getenv("XDG_CONFIG_HOME"); xdg_config && *xdg_config) {
+        candidates.emplace_back(std::filesystem::path(xdg_config) / "webradio" / "stations.json");
+    } else if (const char* home = std::getenv("HOME"); home && *home) {
+        candidates.emplace_back(std::filesystem::path(home) / ".config" / "webradio" / "stations.json");
+    }
+
+    for (const auto& path : candidates) {
+        std::error_code ec;
+        if (std::filesystem::exists(path, ec) && std::filesystem::is_regular_file(path, ec)) {
+            return path.string();
+        }
+    }
+
+    return "stations.json";
 }
 
 class AudioPlayer {
@@ -541,28 +589,28 @@ int main(int argc, char* argv[]) {
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);
     
-    std::string stations_file = "stations.json";
+    std::string stations_file = resolve_default_stations_file();
     if (argc > 1) {
         stations_file = argv[1];
     }
-    
-	std::vector<Station> stations;
+
+	std::vector<Station> stations = load_stations(stations_file);
 
 #ifndef NDEBUG
-	stations = {
-		{"TRANCE","https://content.audioaddict.com/prd/9/a/7/1/9/352c5fe756c019b0988545caf517fbbb11f.mp4?purpose=playback&audio_token=9afc90f92811fba385d6aedd2c559352&network=di&device=chrome_145_windows_10&ip=155.4.125.79&ip_type=4&country_code=SE&show_id=13896&exp=2026-03-01T21:54:14Z&auth=6135aef9dae8e7277bd739a38c3a96bcd37292fb"},
-		{"Bandit Rock", "https://fm02-ice.stream.khz.se/fm02_mp3?platform=web&aw_0_1st.playerid=mtgradio-web&aw_0_1st.skey=1770486477"},
-		{"STAR FM", "https://fm05-ice.stream.khz.se/fm05_mp3?platform=web&aw_0_1st.playerid=mtgradio-web&aw_0_1st.skey=1770487025"},
-		{"RIX FM", "https://fm01-ice.stream.khz.se/fm01_mp3?platform=web&aw_0_1st.playerid=mtgradio-web&aw_0_1st.skey=1770487082"},
-		{"Svenska Favoriter", "https://fm06-ice.stream.khz.se/fm06_mp3?platform=web&aw_0_1st.playerid=mtgradio-web&aw_0_1st.skey=1770487119"},
-		{"Rock Klassiker", "https://live-bauerse-fm.sharp-stream.com/rockklassiker_instream_se_aacp?direct=true&aw_0_1st.playerid=BMUK_inpage_html5&aw_0_1st.skey=1770662685"},
-		{"MIX Megapol", "https://live-bauerse-fm.sharp-stream.com/mixmegapol_instream_se_aacp?direct=true&aw_0_1st.playerid=BMUK_inpage_html5&aw_0_1st.skey=1770662914"},
-		{"Radio 45", "https://streaming.943.se/radio45"},
-		{"Svensk POP", "https://live-bauerse-fm.sharp-stream.com/svenskpop_se_aacp?direct=true&aw_0_1st.playerid=BMUK_inpage_html5&aw_0_1st.skey=1770663244"},
-		{"HYPR DemoScene", "https://hypr.website/hypr.mp3"}
-	};
-#else
-	stations = load_stations(stations_file);
+	if (stations.empty()) {
+		stations = {
+			{"TRANCE","https://content.audioaddict.com/prd/9/a/7/1/9/352c5fe756c019b0988545caf517fbbb11f.mp4?purpose=playback&audio_token=9afc90f92811fba385d6aedd2c559352&network=di&device=chrome_145_windows_10&ip=155.4.125.79&ip_type=4&country_code=SE&show_id=13896&exp=2026-03-01T21:54:14Z&auth=6135aef9dae8e7277bd739a38c3a96bcd37292fb"},
+			{"Bandit Rock", "https://fm02-ice.stream.khz.se/fm02_mp3?platform=web&aw_0_1st.playerid=mtgradio-web&aw_0_1st.skey=1770486477"},
+			{"STAR FM", "https://fm05-ice.stream.khz.se/fm05_mp3?platform=web&aw_0_1st.playerid=mtgradio-web&aw_0_1st.skey=1770487025"},
+			{"RIX FM", "https://fm01-ice.stream.khz.se/fm01_mp3?platform=web&aw_0_1st.playerid=mtgradio-web&aw_0_1st.skey=1770487082"},
+			{"Svenska Favoriter", "https://fm06-ice.stream.khz.se/fm06_mp3?platform=web&aw_0_1st.playerid=mtgradio-web&aw_0_1st.skey=1770487119"},
+			{"Rock Klassiker", "https://live-bauerse-fm.sharp-stream.com/rockklassiker_instream_se_aacp?direct=true&aw_0_1st.playerid=BMUK_inpage_html5&aw_0_1st.skey=1770662685"},
+			{"MIX Megapol", "https://live-bauerse-fm.sharp-stream.com/mixmegapol_instream_se_aacp?direct=true&aw_0_1st.playerid=BMUK_inpage_html5&aw_0_1st.skey=1770662914"},
+			{"Radio 45", "https://streaming.943.se/radio45"},
+			{"Svensk POP", "https://live-bauerse-fm.sharp-stream.com/svenskpop_se_aacp?direct=true&aw_0_1st.playerid=BMUK_inpage_html5&aw_0_1st.skey=1770663244"},
+			{"HYPR DemoScene", "https://hypr.website/hypr.mp3"}
+		};
+	}
 #endif
 
 

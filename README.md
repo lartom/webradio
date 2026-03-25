@@ -73,6 +73,22 @@ cd build && echo "1" | ./webradio
 cd build && ./webradio ../stations.json
 ```
 
+### Station File Search Priority
+
+When no station file argument is provided, WebRadio searches for `stations.json` in this order:
+
+1. Current working directory (`./stations.json`)
+2. Same directory as the `webradio` executable
+3. User config directory:
+   - `$XDG_CONFIG_HOME/webradio/stations.json` (if `XDG_CONFIG_HOME` is set)
+   - otherwise `~/.config/webradio/stations.json`
+
+If a station file path is passed as an argument, that path is used directly:
+
+```bash
+./webradio /path/to/stations.json
+```
+
 ## Controls
 
 | Key | Action |
