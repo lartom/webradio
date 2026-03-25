@@ -22,6 +22,9 @@ static constexpr float MAX_FREQ = 16000.0f; // Hz
 
 #ifdef WEBRADIO_USE_SSE2
 void FFTSpectrum::SampleBuffer::push_mono(const int16_t* stereo, size_t frames) {
+	size_t write = write_pos.load(std::memory_order_relaxed);
+	size_t read = read_pos.load(std::memory_order_acquire);
+
 	// SSE2 optimized version - process 4 frames at a time
 	const __m128 scale = _mm_set1_ps(1.0f / 32768.0f);
 	const __m128 half = _mm_set1_ps(0.5f);
@@ -67,15 +70,12 @@ void FFTSpectrum::SampleBuffer::push_mono(const int16_t* stereo, size_t frames) 
 		_mm_store_ps(mono_samples, mono);
 
 		for (int j = 0; j < 4; ++j) {
-			size_t pos = write_pos.load(std::memory_order_relaxed);
-			samples[pos] = mono_samples[j];
-
-			size_t next_pos = (pos + 1) % SIZE;
-			write_pos.store(next_pos, std::memory_order_release);
+			samples[write] = mono_samples[j];
+			write = (write + 1) & SampleBuffer::MASK;
 
 			// If buffer is full, advance read position (overwrite oldest)
-			if (next_pos == read_pos.load(std::memory_order_acquire)) {
-				read_pos.store((next_pos + 1) % SIZE, std::memory_order_relaxed);
+			if (write == read) {
+				read = (read + 1) & SampleBuffer::MASK;
 			}
 		}
 	}
@@ -87,39 +87,43 @@ void FFTSpectrum::SampleBuffer::push_mono(const int16_t* stereo, size_t frames) 
 		float right = stereo[i * 2 + 1] / 32768.0f;
 		float mono = (left + right) * 0.5f;
 
-		size_t pos = write_pos.load(std::memory_order_relaxed);
-		samples[pos] = mono;
-
-		size_t next_pos = (pos + 1) % SIZE;
-		write_pos.store(next_pos, std::memory_order_release);
+		samples[write] = mono;
+		write = (write + 1) & SampleBuffer::MASK;
 
 		// If buffer is full, advance read position (overwrite oldest)
-		if (next_pos == read_pos.load(std::memory_order_acquire)) {
-			read_pos.store((next_pos + 1) % SIZE, std::memory_order_relaxed);
+		if (write == read) {
+			read = (read + 1) & SampleBuffer::MASK;
 		}
 	}
+
+	read_pos.store(read, std::memory_order_relaxed);
+	write_pos.store(write, std::memory_order_release);
 }
 
 #else
 
 void FFTSpectrum::SampleBuffer::push_mono(const int16_t* stereo, size_t frames) {
+    size_t write = write_pos.load(std::memory_order_relaxed);
+    size_t read = read_pos.load(std::memory_order_acquire);
+
     for (size_t i = 0; i < frames; ++i) {
         // Convert stereo s16 to mono float (-1.0 to 1.0)
         float left = stereo[i * 2] / 32768.0f;
         float right = stereo[i * 2 + 1] / 32768.0f;
         float mono = (left + right) * 0.5f;
         
-        size_t pos = write_pos.load(std::memory_order_relaxed);
-        samples[pos] = mono;
+        samples[write] = mono;
         
-        size_t next_pos = (pos + 1) % SIZE;
-        write_pos.store(next_pos, std::memory_order_release);
+        write = (write + 1) & SampleBuffer::MASK;
         
         // If buffer is full, advance read position (overwrite oldest)
-        if (next_pos == read_pos.load(std::memory_order_acquire)) {
-            read_pos.store((next_pos + 1) % SIZE, std::memory_order_relaxed);
+        if (write == read) {
+            read = (read + 1) & SampleBuffer::MASK;
         }
     }
+
+    read_pos.store(read, std::memory_order_relaxed);
+    write_pos.store(write, std::memory_order_release);
 }
 #endif
 
@@ -127,11 +131,7 @@ size_t FFTSpectrum::SampleBuffer::available() const {
     size_t write = write_pos.load(std::memory_order_acquire);
     size_t read = read_pos.load(std::memory_order_acquire);
     
-    if (write >= read) {
-        return write - read;
-    } else {
-        return SIZE - read + write;
-    }
+    return (write - read) & SampleBuffer::MASK;
 }
 
 bool FFTSpectrum::SampleBuffer::read_block(float* out, size_t count) {
@@ -143,7 +143,7 @@ bool FFTSpectrum::SampleBuffer::read_block(float* out, size_t count) {
     
     for (size_t i = 0; i < count; ++i) {
         out[i] = samples[read];
-        read = (read + 1) % SIZE;
+        read = (read + 1) & SampleBuffer::MASK;
     }
     
     read_pos.store(read, std::memory_order_release);
@@ -154,6 +154,11 @@ FFTSpectrum::FFTSpectrum()
     : fft_input_(FFT_SIZE)
     , fft_real_(FFT_SIZE / 2 + 1)
     , fft_imag_(FFT_SIZE / 2 + 1)
+    , fft_work_real_(FFT_SIZE)
+    , fft_work_imag_(FFT_SIZE)
+    , bit_reverse_(FFT_SIZE)
+    , twiddle_real_(FFT_SIZE / 2)
+    , twiddle_imag_(FFT_SIZE / 2)
     , smoothed_magnitudes_(NUM_BARS, 0.0f)
     , bar_peaks_(NUM_BARS, MIN_PEAK)
     , window_(FFT_SIZE)
@@ -161,6 +166,7 @@ FFTSpectrum::FFTSpectrum()
 {
     init_window();
     init_bar_ranges();
+    init_fft_tables();
     spectrum_data_.updated.store(false);
 }
 
@@ -225,25 +231,70 @@ void FFTSpectrum::init_bar_ranges() {
     }
 }
 
-void FFTSpectrum::dft_real(const float* input, float* real_out, float* imag_out, int n) {
-    // Simple DFT for real input (optimized version)
-    int n2 = n / 2 + 1;
-    float scale = 1.0f / n;  // Normalize by FFT size
-    
-    for (int k = 0; k < n2; ++k) {
-        float real = 0.0f;
-        float imag = 0.0f;
-        
-        // Use symmetry for real input
-        for (int n_idx = 0; n_idx < n; ++n_idx) {
-            float angle = -2.0f * M_PI * k * n_idx / n;
-            real += input[n_idx] * std::cos(angle);
-            imag += input[n_idx] * std::sin(angle);
+void FFTSpectrum::init_fft_tables() {
+    int bits = 0;
+    while ((1 << bits) < FFT_SIZE) {
+        ++bits;
+    }
+
+    for (size_t i = 0; i < FFT_SIZE; ++i) {
+        size_t x = i;
+        size_t r = 0;
+        for (int b = 0; b < bits; ++b) {
+            r = (r << 1) | (x & 1);
+            x >>= 1;
         }
-        
-        // Normalize to prevent overflow and get consistent magnitudes
-        real_out[k] = real * scale;
-        imag_out[k] = imag * scale;
+        bit_reverse_[i] = r;
+    }
+
+    for (size_t k = 0; k < FFT_SIZE / 2; ++k) {
+        float angle = -2.0f * static_cast<float>(M_PI) * static_cast<float>(k) / static_cast<float>(FFT_SIZE);
+        twiddle_real_[k] = std::cos(angle);
+        twiddle_imag_[k] = std::sin(angle);
+    }
+}
+
+void FFTSpectrum::fft_inplace() {
+    for (size_t i = 0; i < FFT_SIZE; ++i) {
+        size_t j = bit_reverse_[i];
+        fft_work_real_[i] = fft_input_[j];
+        fft_work_imag_[i] = 0.0f;
+    }
+
+    for (size_t len = 2; len <= FFT_SIZE; len <<= 1) {
+        size_t half = len >> 1;
+        size_t stride = FFT_SIZE / len;
+
+        for (size_t start = 0; start < FFT_SIZE; start += len) {
+            size_t tw = 0;
+            for (size_t i = 0; i < half; ++i, tw += stride) {
+                size_t a = start + i;
+                size_t b = a + half;
+
+                float wr = twiddle_real_[tw];
+                float wi = twiddle_imag_[tw];
+
+                float br = fft_work_real_[b];
+                float bi = fft_work_imag_[b];
+
+                float tr = wr * br - wi * bi;
+                float ti = wr * bi + wi * br;
+
+                float ar = fft_work_real_[a];
+                float ai = fft_work_imag_[a];
+
+                fft_work_real_[a] = ar + tr;
+                fft_work_imag_[a] = ai + ti;
+                fft_work_real_[b] = ar - tr;
+                fft_work_imag_[b] = ai - ti;
+            }
+        }
+    }
+
+    constexpr float scale = 1.0f / static_cast<float>(FFT_SIZE);
+    for (size_t k = 0; k <= FFT_SIZE / 2; ++k) {
+        fft_real_[k] = fft_work_real_[k] * scale;
+        fft_imag_[k] = fft_work_imag_[k] * scale;
     }
 }
 
@@ -253,17 +304,11 @@ void FFTSpectrum::compute_fft() {
         fft_input_[i] *= window_[i];
     }
     
-    // Compute DFT
-    dft_real(fft_input_.data(), fft_real_.data(), fft_imag_.data(), FFT_SIZE);
+    // Compute FFT
+    fft_inplace();
 }
 
 void FFTSpectrum::update_spectrum() {
-    // Compute magnitude for each frequency bin
-    std::vector<float> magnitudes(FFT_SIZE / 2 + 1);
-    for (size_t i = 0; i < magnitudes.size(); ++i) {
-        magnitudes[i] = std::sqrt(fft_real_[i] * fft_real_[i] + fft_imag_[i] * fft_imag_[i]);
-    }
-
     // Average magnitudes for each bar
     std::array<float, NUM_BARS> new_bars{};
 
@@ -279,7 +324,9 @@ void FFTSpectrum::update_spectrum() {
         // Average magnitude in this frequency range
         float sum = 0.0f;
         for (int bin = start_bin; bin < end_bin; ++bin) {
-            sum += magnitudes[bin];
+            float real = fft_real_[bin];
+            float imag = fft_imag_[bin];
+            sum += std::sqrt(real * real + imag * imag);
         }
         float avg = sum / (end_bin - start_bin);
 

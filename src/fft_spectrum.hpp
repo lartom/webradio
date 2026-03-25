@@ -41,6 +41,7 @@ private:
     // Ring buffer for audio samples (lock-free, single producer)
     struct SampleBuffer {
         static constexpr size_t SIZE = FFT_SIZE * 4;  // 4x FFT size for overlap
+        static constexpr size_t MASK = SIZE - 1;
         std::array<float, SIZE> samples{};
         std::atomic<size_t> write_pos{0};
         std::atomic<size_t> read_pos{0};
@@ -57,6 +58,11 @@ private:
     std::vector<float> fft_input_;
     std::vector<float> fft_real_;
     std::vector<float> fft_imag_;
+    std::vector<float> fft_work_real_;
+    std::vector<float> fft_work_imag_;
+    std::vector<size_t> bit_reverse_;
+    std::vector<float> twiddle_real_;
+    std::vector<float> twiddle_imag_;
     std::vector<float> smoothed_magnitudes_;
     
     // Autogain: track recent peaks per bar for normalization
@@ -74,9 +80,9 @@ private:
     void update_spectrum();
     void init_window();
     void init_bar_ranges();
+    void init_fft_tables();
+    void fft_inplace();
     
-    // DFT computation for real input
-    void dft_real(const float* input, float* real_out, float* imag_out, int n);
 };
 
 #endif // FFT_SPECTRUM_HPP
