@@ -473,7 +473,7 @@ private:
         };
 
         auto convert_frame_to_audio_buffer = [&](AVFrame* decoded_frame) {
-            const uint8_t* const* input = const_cast<const uint8_t* const*>(decoded_frame->extended_data);
+            const uint8_t** input = const_cast<const uint8_t**>(decoded_frame->extended_data);
             int input_samples = decoded_frame->nb_samples;
             bool input_sent = false;
 
